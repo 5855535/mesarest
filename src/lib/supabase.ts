@@ -1,10 +1,12 @@
 import { createClient } from '@supabase/supabase-js'
 
-const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined
+// Toma las variables del entorno del build o las claves públicas por defecto
+const url =
+  (import.meta.env.VITE_SUPABASE_URL as string | undefined) ||
+  'https://nhhufbltbcdwpnytzkgh.supabase.co'
 
-if (!url || !key) {
-  throw new Error('Faltan VITE_SUPABASE_URL o VITE_SUPABASE_PUBLISHABLE_KEY en .env')
-}
+const key =
+  (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined) ||
+  'sb_publishable_CGlLJUEIhsFOlvuuOEUSVg_xI_s5_Ey'
 
 export const supabase = createClient(url, key)
