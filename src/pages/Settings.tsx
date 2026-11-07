@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import {
   Copy,
@@ -11,6 +11,9 @@ import {
   Mic,
   RotateCcw,
   Image as ImageIcon,
+  UploadCloud,
+  Trash2,
+  Loader2,
 } from 'lucide-react'
 import { Skeleton } from '../components/Skeleton'
 import { supabase } from '../lib/supabase'
@@ -49,6 +52,9 @@ export default function Settings() {
 
   const [qrDataUrl, setQrDataUrl] = useState<string>('')
   const [copied, setCopied] = useState(false)
+  const [compressing, setCompressing] = useState(false)
+
+  const menuInputRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
     const [s, u] = await Promise.all([
@@ -116,6 +122,41 @@ export default function Settings() {
       `¡Hola! Ya puedes hacer tus pedidos en ${restName} directo desde tu celular por Telegram aquí:\n${BOT_URL}`,
     )
     window.open(`https://wa.me/?text=${msg}`, '_blank')
+  }
+
+  const handleMenuImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !settings) return
+
+    setCompressing(true)
+    const reader = new FileReader()
+    reader.onload = (re) => {
+      const img = new Image()
+      img.onload = () => {
+        const canvas = document.createElement('canvas')
+        let width = img.width
+        let height = img.height
+        const maxDim = 1400
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width)
+            width = maxDim
+          } else {
+            width = Math.round((width * maxDim) / height)
+            height = maxDim
+          }
+        }
+        canvas.width = width
+        canvas.height = height
+        const ctx = canvas.getContext('2d')
+        ctx?.drawImage(img, 0, 0, width, height)
+        const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.8)
+        setSettings({ ...settings, menu_image_url: compressedDataUrl })
+        setCompressing(false)
+      }
+      img.src = re.target?.result as string
+    }
+    reader.readAsDataURL(file)
   }
 
   const saveSettings = async (e: React.FormEvent) => {
@@ -364,24 +405,86 @@ export default function Settings() {
                 />
               </div>
 
-              {/* Opción C: Imagen de la carta oficial */}
-              <div className="space-y-1.5 p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800">
-                <div className="flex items-center gap-2">
-                  <ImageIcon className="h-4 w-4 text-amber-400" />
-                  <label className="text-xs font-bold text-zinc-200">
-                    Imagen del Menú / Carta para el Bot (/menu)
-                  </label>
+              {/* Opción C: Subida de Foto oficial de la carta */}
+              <div className="space-y-2.5 p-4 rounded-xl bg-zinc-950/80 border border-zinc-800">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <ImageIcon className="h-4 w-4 text-amber-400" />
+                    <label className="text-xs font-bold text-zinc-200">
+                      Foto Oficial de la Carta / Menú para el Bot (/menu)
+                    </label>
+                  </div>
                 </div>
                 <p className="text-[11px] text-zinc-400 leading-relaxed">
-                  Pega aquí el enlace de una foto de tu menú. Cuando un cliente escriba /menu, el bot le enviará esta imagen directamente.
+                  Sube una foto de tu menú o volante. Cuando los clientes escriban /menu o pidan la carta por el bot, se les enviará esta foto directamente.
                 </p>
+
                 <input
-                  type="url"
-                  value={settings.menu_image_url || ''}
-                  onChange={(e) => setSettings({ ...settings, menu_image_url: e.target.value })}
-                  placeholder="https://ejemplo.com/carta-restaurante.jpg"
-                  className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 font-mono focus:border-zinc-600 focus:outline-none"
+                  type="file"
+                  ref={menuInputRef}
+                  onChange={handleMenuImageUpload}
+                  accept="image/*"
+                  className="hidden"
                 />
+
+                {settings.menu_image_url ? (
+                  <div className="flex flex-col sm:flex-row items-center gap-3.5 p-3 rounded-xl bg-zinc-900 border border-zinc-800">
+                    <div className="h-28 w-28 shrink-0 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950 flex items-center justify-center">
+                      <img
+                        src={settings.menu_image_url}
+                        alt="Menú cargado"
+                        className="h-full w-full object-cover"
+                      />
+                    </div>
+                    <div className="flex-1 space-y-2 text-center sm:text-left">
+                      <p className="text-xs font-semibold text-emerald-400 flex items-center justify-center sm:justify-start gap-1.5">
+                        <Check className="h-3.5 w-3.5" />
+                        <span>Foto de la carta cargada</span>
+                      </p>
+                      <p className="text-[11px] text-zinc-400 font-mono">
+                        Recuerda hacer clic en &quot;Guardar cambios&quot; abajo para aplicarla.
+                      </p>
+                      <div className="flex items-center justify-center sm:justify-start gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => menuInputRef.current?.click()}
+                          className="rounded-lg bg-zinc-800 hover:bg-zinc-750 text-zinc-200 text-xs font-semibold px-3 py-1.5 transition border border-zinc-700"
+                        >
+                          Cambiar foto
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSettings({ ...settings, menu_image_url: null })}
+                          className="rounded-lg bg-red-950/60 hover:bg-red-900/60 text-red-300 text-xs font-semibold px-3 py-1.5 transition border border-red-800/60 flex items-center gap-1"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          <span>Eliminar</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    onClick={() => menuInputRef.current?.click()}
+                    className="cursor-pointer rounded-xl border border-dashed border-zinc-700 hover:border-zinc-500 bg-zinc-900/60 p-6 text-center space-y-2 transition"
+                  >
+                    <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-800 text-zinc-300">
+                      {compressing ? (
+                        <Loader2 className="h-5 w-5 animate-spin text-emerald-400" />
+                      ) : (
+                        <UploadCloud className="h-5 w-5" />
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-zinc-200">
+                        {compressing ? 'Optimizando foto...' : 'Haz clic para subir la foto de la carta'}
+                      </p>
+                      <p className="text-[11px] text-zinc-500">
+                        Formatos JPG o PNG desde tu celular, tablet o PC
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </section>

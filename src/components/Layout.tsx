@@ -10,6 +10,9 @@ import {
   Download,
   PanelLeftClose,
   PanelLeftOpen,
+  Share,
+  PlusSquare,
+  X,
 } from 'lucide-react'
 import { useAuth } from '../auth/AuthProvider'
 import { NAV } from '../auth/roles'
@@ -37,6 +40,8 @@ export default function Layout() {
     () => localStorage.getItem('sidebar-collapsed') === '1',
   )
   const [installPrompt, setInstallPrompt] = useState<any>(null)
+  const [isIos, setIsIos] = useState(false)
+  const [showIosGuide, setShowIosGuide] = useState(false)
 
   useEffect(() => {
     const handler = (e: any) => {
@@ -44,6 +49,20 @@ export default function Layout() {
       setInstallPrompt(e)
     }
     window.addEventListener('beforeinstallprompt', handler)
+
+    // Detectar si es iPhone / iPad (iOS) no instalado en standalone
+    const isIosDevice =
+      typeof navigator !== 'undefined' &&
+      /iPad|iPhone|iPod/.test(navigator.userAgent) &&
+      !(window as any).MSStream
+    const isStandalone =
+      (window.navigator as any).standalone === true ||
+      window.matchMedia('(display-mode: standalone)').matches
+
+    if (isIosDevice && !isStandalone) {
+      setIsIos(true)
+    }
+
     return () => window.removeEventListener('beforeinstallprompt', handler)
   }, [])
 
@@ -55,7 +74,11 @@ export default function Layout() {
     })
   }
 
-  const installPwa = async () => {
+  const handleInstallClick = async () => {
+    if (isIos) {
+      setShowIosGuide(true)
+      return
+    }
     if (!installPrompt) return
     installPrompt.prompt()
     const { outcome } = await installPrompt.userChoice
@@ -74,9 +97,7 @@ export default function Layout() {
           {/* Cabecera del Sidebar con Logo y botón de minimizar */}
           <div
             className={`py-3 md:py-4 flex items-center shrink-0 border-b border-zinc-800/80 ${
-              collapsed
-                ? 'px-2 md:justify-center'
-                : 'px-4 justify-between'
+              collapsed ? 'px-2 md:justify-center' : 'px-4 justify-between'
             }`}
           >
             <div className="flex items-center gap-2">
@@ -90,7 +111,6 @@ export default function Layout() {
               )}
             </div>
 
-            {/* Botón para minimizar / expandir sidebar (visible en tablets y desktop) */}
             <button
               onClick={toggleCollapsed}
               title={collapsed ? 'Expandir menú lateral' : 'Minimizar menú lateral'}
@@ -141,13 +161,13 @@ export default function Layout() {
             collapsed ? 'items-center' : ''
           }`}
         >
-          {installPrompt && !collapsed && (
+          {(installPrompt || isIos) && !collapsed && (
             <button
-              onClick={installPwa}
+              onClick={handleInstallClick}
               className="w-full rounded-xl bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-200 py-2 font-semibold transition flex items-center justify-center gap-2"
             >
               <Download className="h-3.5 w-3.5" />
-              <span>Instalar en tablet</span>
+              <span>{isIos ? 'Instalar en iPhone / iPad' : 'Instalar aplicación'}</span>
             </button>
           )}
 
@@ -193,6 +213,81 @@ export default function Layout() {
       <main className="flex-1 p-2.5 sm:p-4 md:p-6 overflow-y-auto bg-zinc-950">
         <Outlet />
       </main>
+
+      {/* GUÍA DE INSTALACIÓN PWA PARA IPHONE / IPAD */}
+      {showIosGuide && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+          <div className="relative w-full max-w-sm rounded-2xl bg-zinc-900 border border-zinc-800 p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Download className="h-4 w-4 text-emerald-400" />
+                <h3 className="font-bold text-sm text-zinc-100">Instalar en iPhone o iPad</h3>
+              </div>
+              <button
+                onClick={() => setShowIosGuide(false)}
+                className="rounded-lg p-1 text-zinc-400 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-300">
+              Para instalar esta app en tu iPhone y usarla en pantalla completa:
+            </p>
+
+            <ol className="space-y-3 text-xs text-zinc-300">
+              <li className="flex items-start gap-2.5 bg-zinc-950 p-2.5 rounded-xl border border-zinc-800">
+                <span className="h-5 w-5 rounded-full bg-zinc-800 text-zinc-200 font-mono font-bold text-xs flex items-center justify-center shrink-0">
+                  1
+                </span>
+                <div>
+                  <p className="font-semibold text-zinc-100 flex items-center gap-1.5">
+                    <span>Toca el botón Compartir</span>
+                    <Share className="h-3.5 w-3.5 text-sky-400 inline" />
+                  </p>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    Está en la barra inferior de Safari (el cuadrado con la flecha arriba).
+                  </p>
+                </div>
+              </li>
+
+              <li className="flex items-start gap-2.5 bg-zinc-950 p-2.5 rounded-xl border border-zinc-800">
+                <span className="h-5 w-5 rounded-full bg-zinc-800 text-zinc-200 font-mono font-bold text-xs flex items-center justify-center shrink-0">
+                  2
+                </span>
+                <div>
+                  <p className="font-semibold text-zinc-100 flex items-center gap-1.5">
+                    <span>Agregar a pantalla de inicio</span>
+                    <PlusSquare className="h-3.5 w-3.5 text-emerald-400 inline" />
+                  </p>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    Baja en las opciones y selecciona &quot;Agregar a pantalla de inicio&quot;.
+                  </p>
+                </div>
+              </li>
+
+              <li className="flex items-start gap-2.5 bg-zinc-950 p-2.5 rounded-xl border border-zinc-800">
+                <span className="h-5 w-5 rounded-full bg-zinc-800 text-zinc-200 font-mono font-bold text-xs flex items-center justify-center shrink-0">
+                  3
+                </span>
+                <div>
+                  <p className="font-semibold text-zinc-100">Toca &quot;Agregar&quot;</p>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    ¡Listo! Aparecerá como una aplicación nativa en tu pantalla.
+                  </p>
+                </div>
+              </li>
+            </ol>
+
+            <button
+              onClick={() => setShowIosGuide(false)}
+              className="w-full rounded-xl bg-zinc-100 hover:bg-white text-zinc-950 font-bold py-2 text-xs transition"
+            >
+              Entendido
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
