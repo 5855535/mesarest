@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 import QRCode from 'qrcode'
-import { Copy, Check, MessageCircle, Download, Save, Send } from 'lucide-react'
+import {
+  Copy,
+  Check,
+  MessageCircle,
+  Download,
+  Save,
+  Send,
+  Bot,
+  Mic,
+  RotateCcw,
+  Image as ImageIcon,
+} from 'lucide-react'
 import { Skeleton } from '../components/Skeleton'
 import { supabase } from '../lib/supabase'
 
@@ -10,6 +21,9 @@ interface BusinessSettings {
   address: string | null
   currency: string
   delivery_fee: number
+  voice_replies_enabled: boolean
+  memory_reorder_enabled: boolean
+  menu_image_url: string | null
 }
 
 interface ProfileInfo {
@@ -42,7 +56,19 @@ export default function Settings() {
       supabase.auth.getUser(),
     ])
 
-    if (s.data) setSettings(s.data as BusinessSettings)
+    if (s.data) {
+      setSettings({
+        name: s.data.name,
+        phone: s.data.phone,
+        address: s.data.address,
+        currency: s.data.currency,
+        delivery_fee: Number(s.data.delivery_fee),
+        voice_replies_enabled: s.data.voice_replies_enabled ?? true,
+        memory_reorder_enabled: s.data.memory_reorder_enabled ?? true,
+        menu_image_url: s.data.menu_image_url ?? null,
+      })
+    }
+
     if (u.data.user) {
       const { data: p } = await supabase
         .from('profiles')
@@ -97,17 +123,21 @@ export default function Settings() {
     if (!settings) return
     setError(null)
     setSaved(false)
-    const { error } = await supabase
+
+    const { error: saveErr } = await supabase
       .from('business_settings')
       .update({
         name: settings.name,
         phone: settings.phone,
         address: settings.address,
         delivery_fee: Number(settings.delivery_fee),
+        voice_replies_enabled: settings.voice_replies_enabled,
+        memory_reorder_enabled: settings.memory_reorder_enabled,
+        menu_image_url: settings.menu_image_url || null,
       })
       .eq('id', true)
 
-    if (error) setError(error.message)
+    if (saveErr) setError(saveErr.message)
     else {
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
@@ -117,8 +147,8 @@ export default function Settings() {
   const generateCode = async () => {
     setCodeBusy(true)
     setError(null)
-    const { data, error } = await supabase.rpc('generate_staff_link_code')
-    if (error) setError(error.message)
+    const { data, error: codeErr } = await supabase.rpc('generate_staff_link_code')
+    if (codeErr) setError(codeErr.message)
     else setLinkCode(data as string)
     setCodeBusy(false)
   }
@@ -146,11 +176,19 @@ export default function Settings() {
     <div className="max-w-3xl space-y-7 pb-10">
       <div>
         <h1 className="text-xl font-bold font-mono tracking-tight text-zinc-100">CONFIGURACIÓN</h1>
-        <p className="text-xs text-zinc-400">Canal de pedidos para clientes y ajustes del negocio</p>
+        <p className="text-xs text-zinc-400">Canal de pedidos para clientes, IA y ajustes del negocio</p>
       </div>
 
-      {error && <p className="rounded-xl bg-red-950/60 border border-red-800/60 p-3 text-xs text-red-300 font-mono">{error}</p>}
-      {saved && <p className="rounded-xl bg-emerald-950/60 border border-emerald-800/60 p-3 text-xs text-emerald-300 font-mono">Cambios guardados con éxito.</p>}
+      {error && (
+        <p className="rounded-xl bg-red-950/60 border border-red-800/60 p-3 text-xs text-red-300 font-mono">
+          {error}
+        </p>
+      )}
+      {saved && (
+        <p className="rounded-xl bg-emerald-950/60 border border-emerald-800/60 p-3 text-xs text-emerald-300 font-mono">
+          Cambios guardados con éxito.
+        </p>
+      )}
 
       {/* 1. COMPARTIR EL BOT CON LOS CLIENTES */}
       <section className="rounded-2xl bg-zinc-900 p-5 md:p-6 border border-zinc-800 space-y-4">
@@ -168,7 +206,8 @@ export default function Settings() {
         </div>
 
         <p className="text-xs text-zinc-400 leading-relaxed">
-          Comparte este enlace o imprime el código QR para colocarlo en las mesas, volantes o mostrador. Los clientes que abran el bot podrán pedir a domicilio o para llevar inmediatamente.
+          Comparte este enlace o imprime el código QR para colocarlo en las mesas, volantes o mostrador.
+          Los clientes que abran el bot podrán pedir a domicilio o para llevar inmediatamente.
         </p>
 
         <div className="flex flex-col sm:flex-row items-center gap-4 bg-zinc-950/80 p-4 rounded-xl border border-zinc-800">
@@ -264,67 +303,152 @@ export default function Settings() {
         )}
       </section>
 
-      {/* 3. DATOS DEL RESTAURANTE */}
+      {/* 3. OPCIONES DE INTELIGENCIA ARTIFICIAL Y BOT */}
       {settings && (
-        <form onSubmit={saveSettings} className="rounded-2xl bg-zinc-900 p-5 md:p-6 border border-zinc-800 space-y-4">
-          <h2 className="text-base font-bold text-zinc-100">Datos del Restaurante</h2>
+        <form onSubmit={saveSettings} className="space-y-7">
+          <section className="rounded-2xl bg-zinc-900 p-5 md:p-6 border border-zinc-800 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-purple-400 font-bold">
+                  Inteligencia Artificial y Mensajería
+                </span>
+                <h2 className="text-base font-bold text-zinc-100 mt-0.5">Comportamiento del Bot</h2>
+              </div>
+              <Bot className="h-5 w-5 text-purple-400" />
+            </div>
 
-          <div className="space-y-3">
-            <label className="block text-xs font-mono uppercase text-zinc-400">
-              Nombre comercial
-              <input
-                type="text"
-                required
-                value={settings.name}
-                onChange={(e) => setSettings({ ...settings, name: e.target.value })}
-                className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
-              />
-            </label>
+            <div className="space-y-4 pt-1">
+              {/* Opción A: Notas de voz */}
+              <div className="flex items-start justify-between gap-4 p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800">
+                <div className="flex items-start gap-3">
+                  <Mic className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-bold text-zinc-200">
+                      Responder con Nota de Voz cuando el cliente envíe audio
+                    </p>
+                    <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
+                      Si el cliente envía un audio de voz, el bot generará una respuesta de audio sintetizada automáticamente.
+                    </p>
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={settings.voice_replies_enabled}
+                  onChange={(e) =>
+                    setSettings({ ...settings, voice_replies_enabled: e.target.checked })
+                  }
+                  className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 accent-emerald-500 cursor-pointer mt-1"
+                />
+              </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Opción B: Memoria y Lo mismo de siempre */}
+              <div className="flex items-start justify-between gap-4 p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800">
+                <div className="flex items-start gap-3">
+                  <RotateCcw className="h-5 w-5 text-sky-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-bold text-zinc-200">
+                      Memoria de Cliente y &quot;Lo mismo de siempre&quot;
+                    </p>
+                    <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
+                      El bot recordará la dirección habitual del cliente y sugerirá repetir su último pedido cuando salude o diga &quot;lo de siempre&quot;.
+                    </p>
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={settings.memory_reorder_enabled}
+                  onChange={(e) =>
+                    setSettings({ ...settings, memory_reorder_enabled: e.target.checked })
+                  }
+                  className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 accent-sky-500 cursor-pointer mt-1"
+                />
+              </div>
+
+              {/* Opción C: Imagen de la carta oficial */}
+              <div className="space-y-1.5 p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800">
+                <div className="flex items-center gap-2">
+                  <ImageIcon className="h-4 w-4 text-amber-400" />
+                  <label className="text-xs font-bold text-zinc-200">
+                    Imagen del Menú / Carta para el Bot (/menu)
+                  </label>
+                </div>
+                <p className="text-[11px] text-zinc-400 leading-relaxed">
+                  Pega aquí el enlace de una foto de tu menú. Cuando un cliente escriba /menu, el bot le enviará esta imagen directamente.
+                </p>
+                <input
+                  type="url"
+                  value={settings.menu_image_url || ''}
+                  onChange={(e) => setSettings({ ...settings, menu_image_url: e.target.value })}
+                  placeholder="https://ejemplo.com/carta-restaurante.jpg"
+                  className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 font-mono focus:border-zinc-600 focus:outline-none"
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* 4. DATOS GENERALES DEL RESTAURANTE */}
+          <section className="rounded-2xl bg-zinc-900 p-5 md:p-6 border border-zinc-800 space-y-4">
+            <h2 className="text-base font-bold text-zinc-100">Datos del Restaurante</h2>
+
+            <div className="space-y-3">
               <label className="block text-xs font-mono uppercase text-zinc-400">
-                Teléfono de contacto
+                Nombre comercial
                 <input
                   type="text"
-                  value={settings.phone || ''}
-                  onChange={(e) => setSettings({ ...settings, phone: e.target.value })}
-                  placeholder="300 123 4567"
+                  required
+                  value={settings.name}
+                  onChange={(e) => setSettings({ ...settings, name: e.target.value })}
                   className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
                 />
               </label>
 
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <label className="block text-xs font-mono uppercase text-zinc-400">
+                  Teléfono de contacto
+                  <input
+                    type="text"
+                    value={settings.phone || ''}
+                    onChange={(e) => setSettings({ ...settings, phone: e.target.value })}
+                    placeholder="300 123 4567"
+                    className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
+                  />
+                </label>
+
+                <label className="block text-xs font-mono uppercase text-zinc-400">
+                  Costo de domicilio (COP)
+                  <input
+                    type="number"
+                    min="0"
+                    step="500"
+                    value={settings.delivery_fee}
+                    onChange={(e) =>
+                      setSettings({ ...settings, delivery_fee: Number(e.target.value) })
+                    }
+                    className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
+                  />
+                </label>
+              </div>
+
               <label className="block text-xs font-mono uppercase text-zinc-400">
-                Costo de domicilio (COP)
+                Dirección física
                 <input
-                  type="number"
-                  min="0"
-                  step="500"
-                  value={settings.delivery_fee}
-                  onChange={(e) => setSettings({ ...settings, delivery_fee: Number(e.target.value) })}
+                  type="text"
+                  value={settings.address || ''}
+                  onChange={(e) => setSettings({ ...settings, address: e.target.value })}
+                  placeholder="Calle 10 # 20 - 30"
                   className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
                 />
               </label>
             </div>
 
-            <label className="block text-xs font-mono uppercase text-zinc-400">
-              Dirección física
-              <input
-                type="text"
-                value={settings.address || ''}
-                onChange={(e) => setSettings({ ...settings, address: e.target.value })}
-                placeholder="Calle 10 # 20 - 30"
-                className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
-              />
-            </label>
-          </div>
-
-          <button
-            type="submit"
-            className="rounded-xl bg-zinc-100 hover:bg-white text-zinc-900 px-5 py-2.5 font-bold text-xs transition flex items-center gap-1.5"
-          >
-            <Save className="h-3.5 w-3.5" />
-            <span>Guardar cambios</span>
-          </button>
+            <button
+              type="submit"
+              className="rounded-xl bg-zinc-100 hover:bg-white text-zinc-900 px-5 py-2.5 font-bold text-xs transition flex items-center gap-1.5"
+            >
+              <Save className="h-3.5 w-3.5" />
+              <span>Guardar cambios</span>
+            </button>
+          </section>
         </form>
       )}
     </div>

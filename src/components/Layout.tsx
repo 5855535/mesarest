@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import {
   LayoutDashboard,
-  ReceiptText,
   Flame,
   Truck,
   UtensilsCrossed,
@@ -17,7 +16,6 @@ import { NAV } from '../auth/roles'
 
 const ICONS: Record<string, any> = {
   '/panel': LayoutDashboard,
-  '/pos': ReceiptText,
   '/cocina': Flame,
   '/despacho': Truck,
   '/catalogo': UtensilsCrossed,

@@ -9,7 +9,6 @@ import Dispatch from './pages/Dispatch'
 import Kitchen from './pages/Kitchen'
 import Login from './pages/Login'
 import NoAccess from './pages/NoAccess'
-import POS from './pages/POS'
 import Settings from './pages/Settings'
 
 function Home() {
@@ -32,9 +31,6 @@ export default function App() {
                 <Route path="/panel" element={<Dashboard />} />
                 <Route path="/catalogo" element={<Catalog />} />
                 <Route path="/configuracion" element={<Settings />} />
-              </Route>
-              <Route element={<RequireRole roles={['admin', 'caja']} />}>
-                <Route path="/pos" element={<POS />} />
               </Route>
               <Route element={<RequireRole roles={['admin', 'cocina']} />}>
                 <Route path="/cocina" element={<Kitchen />} />

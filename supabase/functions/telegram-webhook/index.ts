@@ -1,4 +1,4 @@
-// Supabase Edge Function: telegram-webhook con IA (Gemini 2.5 Flash) y Notas de Voz
+// Supabase Edge Function: telegram-webhook con IA (Gemini 2.5 Flash), Memoria de Cliente y Notas de Voz
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.48.1'
 import {
   parseQuickOrder,
@@ -51,7 +51,6 @@ async function loadCatalog(): Promise<{ catalog: CatalogProduct[]; byId: Map<str
 
   const byId = new Map(catalog.map((p) => [p.id, p]))
 
-  // Resumen textual para enviar en el prompt de Gemini
   const contextStr = catalog
     .map((p) => {
       const ing = p.ingredients.map((i) => i.name + (i.removable ? ' (removible)' : '')).join(', ')
@@ -63,7 +62,6 @@ async function loadCatalog(): Promise<{ catalog: CatalogProduct[]; byId: Map<str
   return { catalog, byId, contextStr }
 }
 
-// Descarga un archivo de Telegram y lo convierte en Base64
 async function downloadTelegramAudio(fileId: string): Promise<{ base64: string; mimeType: string } | null> {
   try {
     const fileInfo = await tg('getFile', { file_id: fileId })
@@ -87,6 +85,33 @@ async function downloadTelegramAudio(fileId: string): Promise<{ base64: string; 
   }
 }
 
+// Envía respuesta por voz sintetizada gratuita cuando el cliente envía audio
+async function sendTtsVoice(chatId: number, text: string): Promise<boolean> {
+  try {
+    const cleanText = text.replace(/[*_`#]/g, '').slice(0, 190)
+    const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(cleanText)}&tl=es&client=tw-ob`
+    const res = await fetch(ttsUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      },
+    })
+    if (res.ok) {
+      const blob = await res.blob()
+      const formData = new FormData()
+      formData.append('chat_id', String(chatId))
+      formData.append('voice', blob, 'respuesta.ogg')
+      await fetch(`${TELEGRAM_API}/sendVoice`, {
+        method: 'POST',
+        body: formData,
+      })
+      return true
+    }
+  } catch (err) {
+    console.error('Error enviando voz TTS:', err)
+  }
+  return false
+}
+
 Deno.serve(async (req) => {
   const secret = req.headers.get('x-telegram-bot-api-secret-token')
   if (WEBHOOK_SECRET && secret !== WEBHOOK_SECRET) {
@@ -101,6 +126,15 @@ Deno.serve(async (req) => {
   } catch {
     return new Response('Bad JSON', { status: 400 })
   }
+
+  // Cargar configuración de negocio
+  const { data: settings } = await supabase
+    .from('business_settings')
+    .select('name, delivery_fee, voice_replies_enabled, memory_reorder_enabled, menu_image_url')
+    .single()
+
+  const voiceRepliesEnabled = settings?.voice_replies_enabled ?? true
+  const memoryReorderEnabled = settings?.memory_reorder_enabled ?? true
 
   // 1. MANEJO DE BOTONES (Callback Queries)
   if (update.callback_query) {
@@ -117,6 +151,65 @@ Deno.serve(async (req) => {
         message_id: cb.message.message_id,
         text: '❌ Pedido cancelado.',
       })
+      return new Response('OK')
+    }
+
+    if (data === 'show_menu') {
+      await sendMenu(chatId, settings?.menu_image_url)
+      return new Response('OK')
+    }
+
+    // Usar dirección guardada habitual
+    if (data === 'use_saved_address') {
+      const { data: session } = await supabase
+        .from('telegram_sessions')
+        .select('*')
+        .eq('chat_id', chatId)
+        .single()
+
+      if (!session || !session.draft_order) {
+        await tg('sendMessage', { chat_id: chatId, text: 'Tu sesión expiró. Escribe o envía tu pedido nuevamente.' })
+        return new Response('OK')
+      }
+
+      const { data: cust } = await supabase
+        .from('customers')
+        .select('address')
+        .eq('telegram_chat_id', chatId)
+        .maybeSingle()
+
+      const draft = session.draft_order
+      draft.address = cust?.address || 'Dirección guardada'
+
+      await supabase.from('telegram_sessions').update({
+        step: 'awaiting_confirmation',
+        draft_order: draft,
+        updated_at: new Date().toISOString(),
+      }).eq('chat_id', chatId)
+
+      await showFinalSummary(chatId, cb.message.message_id, draft, false)
+      return new Response('OK')
+    }
+
+    // Pedir nueva dirección
+    if (data === 'new_address') {
+      await supabase.from('telegram_sessions').update({
+        step: 'awaiting_address',
+        updated_at: new Date().toISOString(),
+      }).eq('chat_id', chatId)
+
+      await tg('editMessageText', {
+        chat_id: chatId,
+        message_id: cb.message.message_id,
+        text: '📍 Por favor escribe tu *nueva dirección de entrega*:',
+        parse_mode: 'Markdown',
+      })
+      return new Response('OK')
+    }
+
+    // Repetir "lo mismo de siempre"
+    if (data === 'reorder_last') {
+      await handleReorderLast(chatId, cb.message.message_id, cb.from)
       return new Response('OK')
     }
 
@@ -137,6 +230,39 @@ Deno.serve(async (req) => {
       draft.deliveryType = type
 
       if (type === 'domicilio') {
+        // Consultar si el cliente ya tiene una dirección guardada
+        const { data: cust } = await supabase
+          .from('customers')
+          .select('address')
+          .eq('telegram_chat_id', chatId)
+          .maybeSingle()
+
+        if (cust?.address) {
+          draft.address = cust.address
+          await supabase.from('telegram_sessions').update({
+            step: 'awaiting_confirmation',
+            draft_order: draft,
+            updated_at: new Date().toISOString(),
+          }).eq('chat_id', chatId)
+
+          await tg('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: `🛵 Elegiste *A Domicilio*.\n\n¿Deseas que te lo enviemos a tu dirección habitual:\n📍 *${cust.address}*?\n\n¿O prefieres una dirección diferente?`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: '✅ Sí, a esa dirección', callback_data: 'use_saved_address' },
+                  { text: '📍 Escribir otra dirección', callback_data: 'new_address' },
+                ],
+                [{ text: '❌ Cancelar', callback_data: 'cancel' }],
+              ],
+            },
+          })
+          return new Response('OK')
+        }
+
         await supabase.from('telegram_sessions').update({
           step: 'awaiting_address',
           draft_order: draft,
@@ -298,6 +424,12 @@ Deno.serve(async (req) => {
       return new Response('OK')
     }
 
+    // Si las respuestas por voz están habilitadas, enviamos confirmación de voz corta
+    if (voiceRepliesEnabled) {
+      const resumenAudio = `Entendido tu pedido de ${aiResult.items.map((i) => `${i.quantity} ${i.product_name}`).join(', ')}. Por favor confirma el tipo de entrega.`
+      sendTtsVoice(chatId, resumenAudio).catch(() => {})
+    }
+
     await processParsedItems(chatId, customerName, username, isStaff, staff, aiResult, catalog, byId)
     return new Response('OK')
   }
@@ -307,6 +439,7 @@ Deno.serve(async (req) => {
   // ========================================================
   if (!msg.text) return new Response('OK')
   const text = msg.text.trim()
+  const lowerText = text.toLowerCase()
 
   if (text.startsWith('/vincular')) {
     const parts = text.split(/\s+/)
@@ -371,7 +504,20 @@ Deno.serve(async (req) => {
     return new Response('OK')
   }
 
-  if (text === '/start' || text.toLowerCase() === 'hola') {
+  // Manejo de "Dame lo mismo de siempre"
+  const isAskingReorder =
+    lowerText === 'lo mismo' ||
+    lowerText === 'lo mismo de siempre' ||
+    lowerText === 'lo de siempre' ||
+    lowerText.includes('lo que pedi') ||
+    lowerText.includes('repetir pedido')
+
+  if (isAskingReorder && !isStaff && memoryReorderEnabled) {
+    await handleReorderLast(chatId, null, fromUser)
+    return new Response('OK')
+  }
+
+  if (text === '/start' || lowerText === 'hola') {
     if (isStaff) {
       await tg('sendMessage', {
         chat_id: chatId,
@@ -379,34 +525,59 @@ Deno.serve(async (req) => {
         parse_mode: 'Markdown',
       })
     } else {
-      await tg('sendMessage', {
-        chat_id: chatId,
-        text: `👋 ¡Hola ${customerName}! Bienvenido a nuestro restaurante.\n\nPuedes pedir en texto o enviarnos una **nota de voz** 🎙 con lo que deseas ordenar.\n\nEscribe /menu para consultar los precios oficiales.`,
-        parse_mode: 'Markdown',
-      })
+      // Verificar si tiene pedidos anteriores para ofrecer "lo mismo de siempre"
+      let lastOrderInfo: any = null
+      if (memoryReorderEnabled) {
+        const { data: cust } = await supabase
+          .from('customers')
+          .select('id')
+          .eq('telegram_chat_id', chatId)
+          .maybeSingle()
+
+        if (cust?.id) {
+          const { data: prevOrder } = await supabase
+            .from('orders')
+            .select('order_number, total, order_items(product_name, quantity)')
+            .eq('customer_id', cust.id)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+
+          if (prevOrder && prevOrder.order_items?.length > 0) {
+            lastOrderInfo = prevOrder
+          }
+        }
+      }
+
+      if (lastOrderInfo) {
+        const itemsTxt = lastOrderInfo.order_items
+          .map((it: any) => `• ${it.quantity}x ${it.product_name}`)
+          .join('\n')
+
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: `👋 ¡Hola ${customerName}! Bienvenido de nuevo a nuestro restaurante.\n\n🍔 *Tu último pedido fue:*\n${itemsTxt}\n💰 Total: *${money(Number(lastOrderInfo.total))}*\n\n¿Deseas pedir *lo mismo de siempre* o prefieres ordenar algo diferente?`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🍔 Pedir lo mismo de siempre', callback_data: 'reorder_last' }],
+              [{ text: '📋 Ver Menú Oficial', callback_data: 'show_menu' }],
+            ],
+          },
+        })
+      } else {
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: `👋 ¡Hola ${customerName}! Bienvenido a nuestro restaurante.\n\nPuedes pedir en texto o enviarnos una **nota de voz** 🎙 con lo que deseas ordenar.\n\nEscribe /menu para consultar los precios oficiales.`,
+          parse_mode: 'Markdown',
+        })
+      }
     }
     return new Response('OK')
   }
 
-  if (text === '/menu') {
-    const { data: cats } = await supabase
-      .from('categories')
-      .select('name, products(name, price, is_available)')
-      .eq('is_active', true)
-      .order('sort_order')
-
-    let menuTxt = '📋 *NUESTRO MENÚ*\n\n'
-    for (const c of cats || []) {
-      const disponibles = (c.products || []).filter((p: any) => p.is_available)
-      if (disponibles.length === 0) continue
-      menuTxt += `*${c.name.toUpperCase()}*\n`
-      for (const p of disponibles) {
-        menuTxt += ` • ${p.name} — ${money(Number(p.price))}\n`
-      }
-      menuTxt += '\n'
-    }
-    menuTxt += 'Pide por texto o nota de voz 🎙.'
-    await tg('sendMessage', { chat_id: chatId, text: menuTxt, parse_mode: 'Markdown' })
+  if (text === '/menu' || lowerText === 'menu' || lowerText === 'la carta') {
+    await sendMenu(chatId, settings?.menu_image_url)
     return new Response('OK')
   }
 
@@ -456,7 +627,121 @@ Deno.serve(async (req) => {
   return new Response('OK')
 })
 
-// Procesa los ítems reconocidos (vengan de Reglas o de Gemini) y arma la respuesta
+// Envía el menú (con foto si existe)
+async function sendMenu(chatId: number, menuImageUrl?: string | null) {
+  if (menuImageUrl) {
+    await tg('sendPhoto', {
+      chat_id: chatId,
+      photo: menuImageUrl,
+      caption: '📋 *NUESTRO MENÚ OFICIAL*\nPuedes ordenar por texto o enviando una nota de voz 🎙.',
+      parse_mode: 'Markdown',
+    })
+    return
+  }
+
+  const { data: cats } = await supabase
+    .from('categories')
+    .select('name, products(name, price, is_available)')
+    .eq('is_active', true)
+    .order('sort_order')
+
+  let menuTxt = '📋 *NUESTRO MENÚ*\n\n'
+  for (const c of cats || []) {
+    const disponibles = (c.products || []).filter((p: any) => p.is_available)
+    if (disponibles.length === 0) continue
+    menuTxt += `*${c.name.toUpperCase()}*\n`
+    for (const p of disponibles) {
+      menuTxt += ` • ${p.name} — ${money(Number(p.price))}\n`
+    }
+    menuTxt += '\n'
+  }
+  menuTxt += 'Pide por texto o nota de voz 🎙.'
+  await tg('sendMessage', { chat_id: chatId, text: menuTxt, parse_mode: 'Markdown' })
+}
+
+// Procesa el reorden del último pedido ("lo mismo de siempre")
+async function handleReorderLast(chatId: number, editMessageId: number | null, fromUser: any) {
+  const { data: cust } = await supabase
+    .from('customers')
+    .select('id, full_name, address')
+    .eq('telegram_chat_id', chatId)
+    .maybeSingle()
+
+  if (!cust?.id) {
+    await tg('sendMessage', { chat_id: chatId, text: 'No tienes pedidos anteriores registrados para repetir.' })
+    return
+  }
+
+  const { data: lastOrder } = await supabase
+    .from('orders')
+    .select('id, total, delivery_type, delivery_address, order_items(product_id, product_name, quantity, line_total, notes, excluded_ingredients, order_item_modifiers(name, extra_price))')
+    .eq('customer_id', cust.id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (!lastOrder || !lastOrder.order_items?.length) {
+    await tg('sendMessage', { chat_id: chatId, text: 'No encontramos tu último pedido.' })
+    return
+  }
+
+  const draftItems = lastOrder.order_items.map((it: any) => ({
+    product_id: it.product_id,
+    quantity: it.quantity,
+    notes: it.notes || null,
+    excluded_ingredients: it.excluded_ingredients || [],
+    modifier_ids: [],
+  }))
+
+  const detalleLines = lastOrder.order_items.map((it: any) => {
+    let l = `• *${it.quantity}x ${it.product_name}*`
+    if (it.excluded_ingredients?.length > 0) l += ` _(Sin: ${it.excluded_ingredients.join(', ')})_`
+    if (it.order_item_modifiers?.length > 0) l += ` _(+ ${it.order_item_modifiers.map((m: any) => m.name).join(', ')})_`
+    return l
+  })
+
+  const draft = {
+    items: draftItems,
+    subtotal: Number(lastOrder.total),
+    deliveryType: lastOrder.delivery_type || 'domicilio',
+    address: lastOrder.delivery_address || cust.address || null,
+    table: null,
+    detalleTxt: detalleLines.join('\n'),
+  }
+
+  await supabase.from('telegram_sessions').upsert({
+    chat_id: chatId,
+    step: 'awaiting_confirmation',
+    customer_name: cust.full_name || fromUser?.first_name || 'Cliente',
+    username: fromUser?.username || null,
+    draft_order: draft,
+    updated_at: new Date().toISOString(),
+  })
+
+  // Preguntar dirección si es domicilio y ya tenía dirección previa
+  if (draft.deliveryType === 'domicilio' && cust.address) {
+    const textMsg = `🍔 *REPETIR TU PEDIDO*\n\n${draft.detalleTxt}\n💰 *Total:* *${money(draft.subtotal)}*\n\n🛵 ¿Deseas que te lo enviemos a tu dirección habitual:\n📍 *${cust.address}*?\n\n¿O prefieres una dirección diferente?`
+    const replyMarkup = {
+      inline_keyboard: [
+        [
+          { text: '✅ Sí, a esa dirección', callback_data: 'use_saved_address' },
+          { text: '📍 Escribir otra dirección', callback_data: 'new_address' },
+        ],
+        [{ text: '❌ Cancelar', callback_data: 'cancel' }],
+      ],
+    }
+
+    if (editMessageId) {
+      await tg('editMessageText', { chat_id: chatId, message_id: editMessageId, text: textMsg, parse_mode: 'Markdown', reply_markup: replyMarkup })
+    } else {
+      await tg('sendMessage', { chat_id: chatId, text: textMsg, parse_mode: 'Markdown', reply_markup: replyMarkup })
+    }
+  } else {
+    await showFinalSummary(chatId, editMessageId, draft, false)
+  }
+}
+
+// Procesa los ítems reconocidos y arma la respuesta
 async function processParsedItems(
   chatId: number,
   customerName: string,
@@ -467,7 +752,6 @@ async function processParsedItems(
   catalog: CatalogProduct[],
   byId: Map<string, any>,
 ) {
-  // Regla: Si cliente pide mesa
   if (!isStaff && extraction.table) {
     await tg('sendMessage', {
       chat_id: chatId,
@@ -477,69 +761,70 @@ async function processParsedItems(
     return
   }
 
-  const byName = new Map(catalog.map((p) => [p.name.toLowerCase().trim(), p]))
-
+  const items: any[] = []
+  const detalleLines: string[] = []
   let subtotal = 0
-  const itemsPayload: any[] = []
-  let detalleTxt = ''
 
-  for (const it of extraction.items) {
-    const prod = byName.get(it.product_name.toLowerCase().trim())
+  for (const item of extraction.items) {
+    let prod = catalog.find((p) => p.name.toLowerCase() === item.product_name.toLowerCase())
+    if (!prod) {
+      prod = catalog.find((p) => p.aliases.some((a) => a.toLowerCase() === item.product_name.toLowerCase()))
+    }
     if (!prod) continue
 
     const modifierIds: string[] = []
-    let extraSum = 0
-    for (const modName of it.modifiers || []) {
-      const m = prod.modifiers.find((x: any) => x.name.toLowerCase().includes(modName.toLowerCase().replace('extra', '').trim()))
-      if (m && !modifierIds.includes(m.id)) {
-        modifierIds.push(m.id)
-        extraSum += m.extra_price || 0
+    let modsPrice = 0
+    for (const mName of item.modifiers || []) {
+      const mod = prod.modifiers.find((m) => m.name.toLowerCase().includes(mName.toLowerCase()))
+      if (mod) {
+        modifierIds.push(mod.id)
+        modsPrice += mod.extra_price
       }
     }
 
-    const lineTotal = (prod.price + extraSum) * it.quantity
-    subtotal += lineTotal
+    const qty = Math.max(1, item.quantity || 1)
+    const linePrice = (prod.price + modsPrice) * qty
+    subtotal += linePrice
 
-    itemsPayload.push({
+    items.push({
       product_id: prod.id,
-      quantity: it.quantity,
-      excluded_ingredients: it.excluded_ingredients || [],
+      quantity: qty,
+      notes: null,
+      excluded_ingredients: item.excluded_ingredients || [],
       modifier_ids: modifierIds,
     })
 
-    detalleTxt += ` • *${it.quantity}×* ${prod.name} (${money(lineTotal)})\n`
-    if (it.excluded_ingredients?.length > 0) {
-      detalleTxt += `    _Sin: ${it.excluded_ingredients.join(', ')}_\n`
-    }
-    if (it.modifiers?.length > 0) {
-      detalleTxt += `    _+ ${it.modifiers.join(', ')}_\n`
-    }
+    let desc = `• *${qty}x ${prod.name}*`
+    if (item.excluded_ingredients?.length > 0) desc += ` _(Sin: ${item.excluded_ingredients.join(', ')})_`
+    if (item.modifiers?.length > 0) desc += ` _(+ ${item.modifiers.join(', ')})_`
+    desc += ` — ${money(linePrice)}`
+    detalleLines.push(desc)
   }
 
-  if (itemsPayload.length === 0) {
+  if (items.length === 0) {
     await tg('sendMessage', {
       chat_id: chatId,
-      text: 'No pude encontrar los productos solicitados en el menú. Consulta el /menu para ver la lista disponible.',
+      text: 'No logré identificar productos disponibles del menú. Por favor escribe /menu para ver la lista.',
     })
     return
   }
 
+  const detalleTxt = detalleLines.join('\n')
+
   const draft = {
-    deliveryType: extraction.deliveryType,
-    table: extraction.table || null,
-    items: itemsPayload,
+    items,
     subtotal,
+    deliveryType: extraction.deliveryType,
+    table: isStaff ? extraction.table : null,
+    address: null,
     detalleTxt,
-    address: null as string | null,
   }
 
-  // Modo STAFF (Mesero)
   if (isStaff) {
-    draft.deliveryType = extraction.table ? 'mesa' : (extraction.deliveryType || 'recogida')
     await supabase.from('telegram_sessions').upsert({
       chat_id: chatId,
       step: 'awaiting_confirmation',
-      customer_name: staff.full_name,
+      customer_name: customerName,
       username,
       draft_order: draft,
       updated_at: new Date().toISOString(),
@@ -550,6 +835,41 @@ async function processParsedItems(
 
   // Modo CLIENTE
   if (extraction.deliveryType === 'domicilio') {
+    // Consultar dirección previa
+    const { data: cust } = await supabase
+      .from('customers')
+      .select('address')
+      .eq('telegram_chat_id', chatId)
+      .maybeSingle()
+
+    if (cust?.address) {
+      draft.address = cust.address
+      await supabase.from('telegram_sessions').upsert({
+        chat_id: chatId,
+        step: 'awaiting_confirmation',
+        customer_name: customerName,
+        username,
+        draft_order: draft,
+        updated_at: new Date().toISOString(),
+      })
+
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: `📝 *RESUMEN PREVIO*\n\n${detalleTxt}\n💰 Subtotal: *${money(subtotal)}*\n\n🛵 ¿Deseas que te lo enviemos a tu dirección habitual:\n📍 *${cust.address}*?\n\n¿O prefieres una dirección diferente?`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '✅ Sí, a esa dirección', callback_data: 'use_saved_address' },
+              { text: '📍 Escribir otra dirección', callback_data: 'new_address' },
+            ],
+            [{ text: '❌ Cancelar', callback_data: 'cancel' }],
+          ],
+        },
+      })
+      return
+    }
+
     await supabase.from('telegram_sessions').upsert({
       chat_id: chatId,
       step: 'awaiting_address',

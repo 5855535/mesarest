@@ -9,6 +9,7 @@ import {
   Maximize2,
   Minimize2,
   HelpCircle,
+  SlidersHorizontal,
 } from 'lucide-react'
 import { CardSkeleton } from '../components/Skeleton'
 import { SwipeableCard } from '../components/SwipeableCard'
@@ -79,6 +80,11 @@ export default function Kitchen() {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [view, setView] = useState<'activos' | 'listos'>('activos')
   const [isFullscreen, setIsFullscreen] = useState(false)
+
+  // Densidad: 'auto' (se ajusta según la cantidad), 'compact' o 'normal'
+  const [density, setDensity] = useState<'auto' | 'compact' | 'normal'>(
+    () => (localStorage.getItem('kitchen-density') as any) || 'auto',
+  )
 
   const seen = useRef<Set<string> | null>(null)
   const soundRef = useRef(sound)
@@ -165,6 +171,14 @@ export default function Kitchen() {
     }
   }
 
+  const cycleDensity = () => {
+    setDensity((prev) => {
+      const next = prev === 'auto' ? 'compact' : prev === 'compact' ? 'normal' : 'auto'
+      localStorage.setItem('kitchen-density', next)
+      return next
+    })
+  }
+
   // Avance optimista instantáneo (0 ms lag)
   const advance = async (o: KOrder) => {
     const next: KStatus | null =
@@ -222,8 +236,12 @@ export default function Kitchen() {
   const preparando = orders.filter((o) => o.status === 'preparando')
   const listos = orders.filter((o) => o.status === 'listo')
 
+  // Auto-adaptación: si hay 3 o más pedidos activos, compacta automáticamente respetando el límite mínimo de tamaño
+  const totalActivos = nuevos.length + preparando.length
+  const isCompact = density === 'compact' || (density === 'auto' && totalActivos >= 3)
+
   return (
-    <div className="space-y-3.5">
+    <div className="space-y-3">
       {/* Barra de control superior para Tablet */}
       <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex items-center gap-3">
@@ -254,7 +272,7 @@ export default function Kitchen() {
             >
               <span>En Cocina</span>
               <span className="rounded bg-zinc-700/80 px-1.5 py-0.2 text-[10px] font-mono">
-                {nuevos.length + preparando.length}
+                {totalActivos}
               </span>
             </button>
             <button
@@ -272,11 +290,27 @@ export default function Kitchen() {
             </button>
           </div>
 
+          {/* Selector de Tamaño / Densidad de tarjetas */}
+          <button
+            onClick={cycleDensity}
+            title={`Tamaño de tarjetas: ${
+              density === 'auto'
+                ? 'Automático (se adapta al número de pedidos)'
+                : density === 'compact'
+                  ? 'Compacto'
+                  : 'Normal'
+            }`}
+            className="rounded-xl px-2.5 py-1.5 text-xs font-mono transition border bg-zinc-900 border-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-1.5"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5 text-sky-400" />
+            <span className="capitalize">{density}</span>
+          </button>
+
           {/* Timbre Sonoro */}
           <button
             onClick={toggleSound}
             title={sound ? 'Silenciar alarma' : 'Activar timbre sonoro'}
-            className={`rounded-xl p-2.5 text-sm transition border ${
+            className={`rounded-xl p-2 text-sm transition border ${
               sound
                 ? 'bg-zinc-800 border-zinc-700 text-emerald-400 shadow-sm'
                 : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300'
@@ -289,7 +323,7 @@ export default function Kitchen() {
           <button
             onClick={toggleFullscreen}
             title={isFullscreen ? 'Salir de pantalla completa' : 'Pantalla completa para Tablet'}
-            className="rounded-xl p-2.5 text-sm transition border bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+            className="rounded-xl p-2 text-sm transition border bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
           >
             {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
           </button>
@@ -297,7 +331,7 @@ export default function Kitchen() {
       </div>
 
       {/* Sugerencia táctil */}
-      <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 bg-zinc-900/60 border border-zinc-800/80 rounded-xl px-3.5 py-1.5">
+      <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 bg-zinc-900/60 border border-zinc-800/80 rounded-xl px-3 py-1.5">
         <span className="flex items-center gap-2">
           <HelpCircle className="h-3.5 w-3.5 text-sky-400 shrink-0" />
           <span>
@@ -324,7 +358,7 @@ export default function Kitchen() {
         /* En horizontal (landscape) o en pantallas md: SIEMPRE quedan 2 columnas lado a lado (horizontal) */
         <div className="grid grid-cols-1 landscape:grid-cols-2 md:grid-cols-2 gap-3.5 items-start">
           {/* COLUMNA 1: NUEVOS (Izquierda) */}
-          <section className="space-y-3 rounded-2xl bg-zinc-900/40 p-3 border border-zinc-800/80">
+          <section className="space-y-2.5 rounded-2xl bg-zinc-900/40 p-2.5 sm:p-3 border border-zinc-800/80">
             <header className="flex items-center justify-between px-1">
               <span className="text-xs font-bold font-mono tracking-wider text-sky-400 uppercase flex items-center gap-2">
                 <span className="h-2 w-2 rounded-full bg-sky-400 animate-pulse" />
@@ -336,20 +370,24 @@ export default function Kitchen() {
             </header>
 
             {nuevos.length === 0 && (
-              <div className="py-16 text-center border border-dashed border-zinc-800/80 rounded-xl">
+              <div className="py-14 text-center border border-dashed border-zinc-800/80 rounded-xl">
                 <p className="text-xs font-mono text-zinc-600">SIN PEDIDOS NUEVOS</p>
               </div>
             )}
 
-            <div className="space-y-3">
+            <div
+              className={`grid gap-2.5 ${
+                isCompact && nuevos.length >= 4 ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'
+              }`}
+            >
               {nuevos.map((o) => (
                 <SwipeableCard
                   key={o.id}
                   onSwipeRight={() => advance(o)}
                   onClick={() => advance(o)}
                   swipeRightLabel="Preparar"
-                  swipeRightIcon={<Flame className="h-5 w-5" />}
-                  threshold={85}
+                  swipeRightIcon={<Flame className="h-4 w-4" />}
+                  threshold={isCompact ? 65 : 80}
                   disabled={busyId === o.id}
                 >
                   <KitchenCard
@@ -357,6 +395,7 @@ export default function Kitchen() {
                     minutes={minutes(o)}
                     isFlashing={flash.has(o.id)}
                     isBusy={busyId === o.id}
+                    isCompact={isCompact}
                     actionText="DESLIZA 👉 PREPARAR"
                   />
                 </SwipeableCard>
@@ -365,7 +404,7 @@ export default function Kitchen() {
           </section>
 
           {/* COLUMNA 2: PREPARANDO (Derecha) */}
-          <section className="space-y-3 rounded-2xl bg-zinc-900/40 p-3 border border-zinc-800/80">
+          <section className="space-y-2.5 rounded-2xl bg-zinc-900/40 p-2.5 sm:p-3 border border-zinc-800/80">
             <header className="flex items-center justify-between px-1">
               <span className="text-xs font-bold font-mono tracking-wider text-amber-400 uppercase flex items-center gap-2">
                 <span className="h-2 w-2 rounded-full bg-amber-400" />
@@ -377,12 +416,16 @@ export default function Kitchen() {
             </header>
 
             {preparando.length === 0 && (
-              <div className="py-16 text-center border border-dashed border-zinc-800/80 rounded-xl">
+              <div className="py-14 text-center border border-dashed border-zinc-800/80 rounded-xl">
                 <p className="text-xs font-mono text-zinc-600">NADA EN PREPARACIÓN</p>
               </div>
             )}
 
-            <div className="space-y-3">
+            <div
+              className={`grid gap-2.5 ${
+                isCompact && preparando.length >= 4 ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'
+              }`}
+            >
               {preparando.map((o) => (
                 <SwipeableCard
                   key={o.id}
@@ -390,10 +433,10 @@ export default function Kitchen() {
                   onSwipeLeft={() => rewind(o)}
                   onClick={() => advance(o)}
                   swipeRightLabel="Listo"
-                  swipeRightIcon={<CheckCheck className="h-5 w-5" />}
+                  swipeRightIcon={<CheckCheck className="h-4 w-4" />}
                   swipeLeftLabel="Regresar a Nuevos"
-                  swipeLeftIcon={<Undo2 className="h-5 w-5" />}
-                  threshold={85}
+                  swipeLeftIcon={<Undo2 className="h-4 w-4" />}
+                  threshold={isCompact ? 65 : 80}
                   disabled={busyId === o.id}
                 >
                   <KitchenCard
@@ -401,6 +444,7 @@ export default function Kitchen() {
                     minutes={minutes(o)}
                     isFlashing={flash.has(o.id)}
                     isBusy={busyId === o.id}
+                    isCompact={isCompact}
                     onRewind={(e) => {
                       e.stopPropagation()
                       rewind(o)
@@ -414,7 +458,7 @@ export default function Kitchen() {
         </div>
       ) : (
         /* VISTA LISTOS / ARCHIVADOS */
-        <section className="space-y-3 max-w-2xl mx-auto">
+        <section className="space-y-2.5 max-w-2xl mx-auto">
           {listos.length === 0 && (
             <div className="py-16 text-center border border-dashed border-zinc-800/80 rounded-xl">
               <p className="text-xs font-mono text-zinc-600">NO HAY PEDIDOS LISTOS</p>
@@ -425,11 +469,11 @@ export default function Kitchen() {
               key={o.id}
               onSwipeLeft={() => rewind(o)}
               swipeLeftLabel="Regresar a Preparación"
-              swipeLeftIcon={<Undo2 className="h-5 w-5" />}
-              threshold={85}
+              swipeLeftIcon={<Undo2 className="h-4 w-4" />}
+              threshold={isCompact ? 65 : 80}
               disabled={busyId === o.id}
             >
-              <div className="flex items-center justify-between rounded-xl bg-zinc-900 p-4 border border-zinc-800 text-sm shadow-md">
+              <div className="flex items-center justify-between rounded-xl bg-zinc-900 p-3.5 border border-zinc-800 text-sm shadow-md">
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="font-mono font-black text-base text-zinc-100">
@@ -439,7 +483,7 @@ export default function Kitchen() {
                       {typeBadge(o)}
                     </span>
                   </div>
-                  <p className="text-xs text-zinc-400 mt-1.5 font-medium">
+                  <p className="text-xs text-zinc-400 mt-1 font-medium">
                     {o.order_items.map((it) => `${it.quantity}x ${it.product_name}`).join(', ')}
                   </p>
                   {o.notes && <p className="text-xs text-zinc-500 italic mt-0.5">“{o.notes}”</p>}
@@ -451,7 +495,7 @@ export default function Kitchen() {
                     rewind(o)
                   }}
                   disabled={busyId === o.id}
-                  className="rounded-xl border border-zinc-700 bg-zinc-800 px-3.5 py-2 text-xs font-bold text-zinc-300 hover:text-white hover:bg-zinc-700 transition flex items-center gap-1.5 shrink-0"
+                  className="rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-bold text-zinc-300 hover:text-white hover:bg-zinc-700 transition flex items-center gap-1.5 shrink-0"
                 >
                   <Undo2 className="h-3.5 w-3.5" />
                   <span>Regresar</span>
@@ -470,6 +514,7 @@ function KitchenCard({
   minutes: mins,
   isFlashing,
   isBusy,
+  isCompact = false,
   onRewind,
   actionText,
 }: {
@@ -477,6 +522,7 @@ function KitchenCard({
   minutes: number
   isFlashing: boolean
   isBusy: boolean
+  isCompact?: boolean
   onRewind?: (e: React.MouseEvent) => void
   actionText: string
 }) {
@@ -485,96 +531,122 @@ function KitchenCard({
 
   return (
     <article
-      className={`group relative rounded-2xl bg-zinc-900 p-4 md:p-5 transition border shadow-lg ${
+      className={`group relative rounded-xl transition border shadow-md flex flex-col justify-between ${
+        isCompact ? 'p-3 min-h-[115px]' : 'p-4 md:p-5 min-h-[145px]'
+      } ${
         isFlashing
           ? 'animate-pulse border-sky-400 bg-sky-950/25 ring-2 ring-sky-400/40'
           : late
             ? 'border-red-500/80 bg-red-950/15 ring-1 ring-red-500/30'
             : warn
               ? 'border-amber-500/70 bg-amber-950/15'
-              : 'border-zinc-800 hover:border-zinc-700'
+              : 'border-zinc-800 hover:border-zinc-700 bg-zinc-900'
       } ${isBusy ? 'opacity-40 pointer-events-none' : ''}`}
     >
-      {/* Cabecera del ticket con número grande y badge */}
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2.5">
-          <span className="text-3xl font-black font-mono tracking-tight text-white">
-            #{o.order_number}
-          </span>
-          <span className="rounded-lg bg-zinc-800 border border-zinc-700/80 px-2.5 py-1 text-xs font-mono font-bold text-zinc-200">
-            {typeBadge(o)}
-          </span>
+      <div>
+        {/* Cabecera del ticket con número y badge */}
+        <div className="flex items-start justify-between gap-1.5">
+          <div className="flex items-center gap-2">
+            <span
+              className={`font-black font-mono tracking-tight text-white ${
+                isCompact ? 'text-xl' : 'text-2xl md:text-3xl'
+              }`}
+            >
+              #{o.order_number}
+            </span>
+            <span
+              className={`rounded border border-zinc-700/80 font-mono font-bold text-zinc-200 bg-zinc-800 ${
+                isCompact ? 'px-1.5 py-0.5 text-[10px]' : 'px-2.5 py-1 text-xs'
+              }`}
+            >
+              {typeBadge(o)}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {onRewind && (
+              <button
+                onClick={onRewind}
+                title="Regresar a Nuevos"
+                className="rounded p-1 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition"
+              >
+                <Undo2 className={isCompact ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
+              </button>
+            )}
+            <span
+              className={`font-mono font-bold rounded border ${
+                isCompact ? 'text-[11px] px-1.5 py-0.2' : 'text-xs px-2.5 py-1'
+              } ${
+                late
+                  ? 'bg-red-500/20 text-red-300 border-red-500/50 animate-pulse'
+                  : warn
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700/60'
+              }`}
+            >
+              {mins}m
+            </span>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {onRewind && (
-            <button
-              onClick={onRewind}
-              title="Regresar a Nuevos"
-              className="rounded-lg p-1.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition"
-            >
-              <Undo2 className="h-4 w-4" />
-            </button>
-          )}
-          <span
-            className={`font-mono text-xs font-bold px-2.5 py-1 rounded-lg border ${
-              late
-                ? 'bg-red-500/20 text-red-300 border-red-500/50 animate-pulse'
-                : warn
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
-                  : 'bg-zinc-800 text-zinc-400 border-zinc-700/60'
+        {/* Lista de productos con límite mínimo de texto legible (text-xs) */}
+        <ul
+          className={`border-t border-zinc-800/80 ${
+            isCompact ? 'mt-2 pt-2 space-y-1' : 'mt-3 pt-3 space-y-1.5'
+          }`}
+        >
+          {o.order_items.map((it) => (
+            <li key={it.id} className="text-zinc-100">
+              <p className={`font-bold leading-tight ${isCompact ? 'text-xs' : 'text-sm'}`}>
+                <span className="font-mono mr-1.5 px-1 py-0.2 rounded text-[11px] bg-zinc-800 text-white font-black">
+                  {it.quantity}×
+                </span>
+                {it.product_name}
+              </p>
+
+              {it.excluded_ingredients.length > 0 && (
+                <p className="text-[11px] font-bold text-red-400 mt-0.5 pl-6">
+                  🚫 SIN: {it.excluded_ingredients.join(', ')}
+                </p>
+              )}
+
+              {it.order_item_modifiers.length > 0 && (
+                <p className="text-[11px] text-sky-400 font-medium mt-0.5 pl-6">
+                  + {it.order_item_modifiers.map((m) => m.name).join(', ')}
+                </p>
+              )}
+
+              {it.notes && (
+                <p className="text-[11px] italic text-amber-300/90 mt-0.5 pl-6">“{it.notes}”</p>
+              )}
+            </li>
+          ))}
+        </ul>
+
+        {o.notes && (
+          <div
+            className={`rounded-lg bg-amber-950/20 border border-amber-800/40 text-amber-200 ${
+              isCompact ? 'mt-2 p-1.5 text-[11px]' : 'mt-2.5 p-2 text-xs'
             }`}
           >
-            {mins} min
-          </span>
-        </div>
+            <strong className="uppercase font-mono text-[9px] tracking-wider text-amber-400 block mb-0.5">
+              Nota:
+            </strong>
+            {o.notes}
+          </div>
+        )}
       </div>
 
-      {/* Lista de productos limpia y destacada */}
-      <ul className="mt-3.5 space-y-2 border-t border-zinc-800/80 pt-3 text-sm">
-        {o.order_items.map((it) => (
-          <li key={it.id} className="rounded-lg p-1 text-zinc-100">
-            <p className="font-bold text-sm leading-snug">
-              <span className="font-mono mr-2 px-1.5 py-0.5 rounded text-xs bg-zinc-800 text-white font-black">
-                {it.quantity}×
-              </span>
-              {it.product_name}
-            </p>
-
-            {it.excluded_ingredients.length > 0 && (
-              <p className="text-xs font-bold text-red-400 mt-1 pl-7">
-                🚫 SIN: {it.excluded_ingredients.join(', ')}
-              </p>
-            )}
-
-            {it.order_item_modifiers.length > 0 && (
-              <p className="text-xs text-sky-400 font-medium mt-0.5 pl-7">
-                + {it.order_item_modifiers.map((m) => m.name).join(', ')}
-              </p>
-            )}
-
-            {it.notes && (
-              <p className="text-xs italic text-amber-300/90 mt-0.5 pl-7">“{it.notes}”</p>
-            )}
-          </li>
-        ))}
-      </ul>
-
-      {o.notes && (
-        <div className="mt-3 rounded-xl bg-amber-950/20 border border-amber-800/40 p-2.5 text-xs text-amber-200">
-          <strong className="uppercase font-mono text-[10px] tracking-wider text-amber-400 block mb-0.5">
-            Nota general del pedido:
-          </strong>
-          {o.notes}
-        </div>
-      )}
-
       {/* Pie táctil para tablet */}
-      <div className="mt-3.5 pt-2.5 border-t border-zinc-800/60 flex items-center justify-between text-[11px] font-mono">
-        <span className="text-zinc-500">1 toque o desliza</span>
+      <div
+        className={`border-t border-zinc-800/60 flex items-center justify-between font-mono ${
+          isCompact ? 'mt-2 pt-1.5 text-[10px]' : 'mt-3 pt-2 text-[11px]'
+        }`}
+      >
+        <span className="text-zinc-500">Desliza o toca</span>
         <span className="text-emerald-400 font-bold flex items-center gap-1 group-hover:translate-x-1 transition-transform">
           <span>{actionText}</span>
-          <ArrowRight className="h-3.5 w-3.5" />
+          <ArrowRight className={isCompact ? 'h-3 w-3' : 'h-3.5 w-3.5'} />
         </span>
       </div>
     </article>
