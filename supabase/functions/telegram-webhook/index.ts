@@ -1,4 +1,4 @@
-// Supabase Edge Function: telegram-webhook con IA (Gemini 2.5 Flash), GPS/Ubicación en tiempo real, Memoria de Cliente y Notas de Voz
+// Supabase Edge Function: telegram-webhook con IA (Gemini 2.5 Flash), GPS, Memoria de Cliente, Menú de hasta 3 fotos y Lenguaje Natural
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.48.1'
 import {
   parseQuickOrder,
@@ -157,11 +157,16 @@ Deno.serve(async (req) => {
   // Cargar configuración de negocio
   const { data: settings } = await supabase
     .from('business_settings')
-    .select('name, delivery_fee, voice_replies_enabled, memory_reorder_enabled, menu_image_url')
+    .select('name, delivery_fee, voice_replies_enabled, memory_reorder_enabled, menu_images, menu_image_url')
     .single()
 
   const voiceRepliesEnabled = settings?.voice_replies_enabled ?? true
   const memoryReorderEnabled = settings?.memory_reorder_enabled ?? true
+  const menuImagesList = Array.isArray(settings?.menu_images) && settings.menu_images.length > 0
+    ? settings.menu_images
+    : settings?.menu_image_url
+      ? [settings.menu_image_url]
+      : []
 
   // 1. MANEJO DE BOTONES (Callback Queries)
   if (update.callback_query) {
@@ -182,7 +187,7 @@ Deno.serve(async (req) => {
     }
 
     if (data === 'show_menu') {
-      await sendMenu(chatId, settings?.menu_image_url)
+      await sendMenu(chatId, menuImagesList)
       return new Response('OK')
     }
 
@@ -596,25 +601,42 @@ Deno.serve(async (req) => {
     return new Response('OK')
   }
 
-  // Manejo de "Dame lo mismo de siempre"
+  // Detección en lenguaje natural: "Dame lo mismo de siempre"
   const isAskingReorder =
     lowerText === 'lo mismo' ||
     lowerText === 'lo mismo de siempre' ||
     lowerText === 'lo de siempre' ||
     lowerText.includes('lo que pedi') ||
-    lowerText.includes('repetir pedido')
+    lowerText.includes('repetir pedido') ||
+    lowerText.includes('repetir mi pedido')
 
   if (isAskingReorder && !isStaff && memoryReorderEnabled) {
     await handleReorderLast(chatId, null, fromUser)
     return new Response('OK')
   }
 
-  if (text === '/start' || lowerText === 'hola') {
+  // Detección en lenguaje natural: Saludos comunes (sin necesidad de comandos)
+  const isGreeting =
+    text === '/start' ||
+    lowerText === 'hola' ||
+    lowerText === 'buenas' ||
+    lowerText === 'buenas tardes' ||
+    lowerText === 'buenos dias' ||
+    lowerText === 'buenos días' ||
+    lowerText === 'buenas noches' ||
+    lowerText.startsWith('hola ') ||
+    lowerText === 'buen dia' ||
+    lowerText === 'buen día'
+
+  if (isGreeting) {
     if (isStaff) {
       await tg('sendMessage', {
         chat_id: chatId,
-        text: `👨‍🍳 *Modo Personal activo* (${staff.full_name} - ${staff.role})\n\nEnvía pedidos en texto o con una **nota de voz** 🎙:\n👉 _"mesa 3, 2 especiales, 1 cocacola"_\n\nUsa /menu para ver la lista o /desvincular para salir.`,
+        text: `👨‍🍳 *Modo Personal activo* (${staff.full_name} - ${staff.role})\n\nEnvía pedidos en texto o con una **nota de voz** 🎙:\n👉 _"mesa 3, 2 especiales, 1 cocacola"_\n\nPuedes consultar la carta en el botón o usar /desvincular para salir.`,
         parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '📋 Ver Menú / Carta', callback_data: 'show_menu' }]],
+        },
       })
     } else {
       // Verificar si tiene pedidos anteriores para ofrecer "lo mismo de siempre"
@@ -653,23 +675,52 @@ Deno.serve(async (req) => {
           reply_markup: {
             inline_keyboard: [
               [{ text: '🍔 Pedir lo mismo de siempre', callback_data: 'reorder_last' }],
-              [{ text: '📋 Ver Menú Oficial', callback_data: 'show_menu' }],
+              [{ text: '📋 Ver Menú / Carta', callback_data: 'show_menu' }],
             ],
           },
         })
       } else {
         await tg('sendMessage', {
           chat_id: chatId,
-          text: `👋 ¡Hola ${customerName}! Bienvenido a nuestro restaurante.\n\nPuedes pedir en texto o enviarnos una **nota de voz** 🎙 con lo que deseas ordenar.\n\nEscribe /menu para consultar los precios oficiales.`,
+          text: `👋 ¡Hola ${customerName}! Bienvenido a nuestro restaurante.\n\n¿Qué se te antoja hoy? Puedes escribirnos directamente tu pedido, enviarnos una **nota de voz** 🎙 o consultar nuestra carta:`,
           parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📋 Ver Menú / Carta', callback_data: 'show_menu' }],
+            ],
+          },
         })
       }
     }
     return new Response('OK')
   }
 
-  if (text === '/menu' || lowerText === 'menu' || lowerText === 'la carta') {
-    await sendMenu(chatId, settings?.menu_image_url)
+  // Detección en lenguaje natural: Preguntar por el menú / carta / precios
+  const isAskingMenu =
+    text === '/menu' ||
+    lowerText === 'menu' ||
+    lowerText === 'menú' ||
+    lowerText === 'la carta' ||
+    lowerText === 'carta' ||
+    lowerText.includes('ver menu') ||
+    lowerText.includes('ver menú') ||
+    lowerText.includes('ver carta') ||
+    lowerText.includes('la carta') ||
+    lowerText.includes('que tienen') ||
+    lowerText.includes('qué tienen') ||
+    lowerText.includes('que venden') ||
+    lowerText.includes('qué venden') ||
+    lowerText.includes('precios') ||
+    lowerText.includes('tienen carta') ||
+    lowerText.includes('tienes carta') ||
+    lowerText.includes('fotos del menu') ||
+    lowerText.includes('foto del menu') ||
+    lowerText.includes('foto de la carta') ||
+    lowerText.includes('muestrame la carta') ||
+    lowerText.includes('muéstrame la carta')
+
+  if (isAskingMenu) {
+    await sendMenu(chatId, menuImagesList)
     return new Response('OK')
   }
 
@@ -713,24 +764,63 @@ Deno.serve(async (req) => {
   // Mensaje cuando no se entendió
   await tg('sendMessage', {
     chat_id: chatId,
-    text: `No alcancé a entender los productos 🤔.\n\nIntenta escribir algo como:\n👉 _"2 hamburguesas clásicas y una gaseosa"_\nO envía una nota de voz 🎙. Revisa el /menu para ver la lista.`,
+    text: `No alcancé a entender los productos 🤔.\n\nPuedes escribir algo como:\n👉 _"2 hamburguesas clásicas y una gaseosa"_\nO enviar una nota de voz 🎙. Toca el botón para ver la carta:`,
     parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [[{ text: '📋 Ver Menú / Carta', callback_data: 'show_menu' }]],
+    },
   })
   return new Response('OK')
 })
 
-// Envía el menú (con foto si existe)
-async function sendMenu(chatId: number, menuImageUrl?: string | null) {
-  if (menuImageUrl) {
-    await tg('sendPhoto', {
+// Envía el menú (hasta 3 fotos si existen o texto estructurado)
+async function sendMenu(chatId: number, menuImagesRaw?: any) {
+  let images: string[] = []
+  if (Array.isArray(menuImagesRaw)) {
+    images = menuImagesRaw.slice(0, 3)
+  } else if (typeof menuImagesRaw === 'string' && menuImagesRaw.trim()) {
+    images = [menuImagesRaw]
+  }
+
+  if (images.length > 0) {
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i]
+      const caption = images.length > 1
+        ? `📋 *MENÚ OFICIAL (Página ${i + 1} de ${images.length})*`
+        : '📋 *NUESTRO MENÚ OFICIAL*'
+
+      if (img.startsWith('data:image/')) {
+        const commaIdx = img.indexOf(',')
+        const base64 = img.slice(commaIdx + 1)
+        const mime = img.slice(5, commaIdx).split(';')[0] || 'image/jpeg'
+        const binary = atob(base64)
+        const bytes = new Uint8Array(binary.length)
+        for (let j = 0; j < binary.length; j++) bytes[j] = binary.charCodeAt(j)
+        const blob = new Blob([bytes], { type: mime })
+        const form = new FormData()
+        form.append('chat_id', String(chatId))
+        form.append('photo', blob, `menu_${i + 1}.jpg`)
+        form.append('caption', caption)
+        form.append('parse_mode', 'Markdown')
+        await fetch(`${TELEGRAM_API}/sendPhoto`, { method: 'POST', body: form })
+      } else {
+        await tg('sendPhoto', {
+          chat_id: chatId,
+          photo: img,
+          caption,
+          parse_mode: 'Markdown',
+        })
+      }
+    }
+
+    await tg('sendMessage', {
       chat_id: chatId,
-      photo: menuImageUrl,
-      caption: '📋 *NUESTRO MENÚ OFICIAL*\nPuedes ordenar por texto o enviando una nota de voz 🎙.',
-      parse_mode: 'Markdown',
+      text: '👆 ¡Ahí tienes nuestra carta! Puedes pedir escribiendo directamente lo que deseas o enviándonos una nota de voz 🎙.',
     })
     return
   }
 
+  // Si no hay fotos cargadas, se envía el listado de texto del catálogo
   const { data: cats } = await supabase
     .from('categories')
     .select('name, products(name, price, is_available)')
@@ -896,7 +986,10 @@ async function processParsedItems(
   if (items.length === 0) {
     await tg('sendMessage', {
       chat_id: chatId,
-      text: 'No logré identificar productos disponibles del menú. Por favor escribe /menu para ver la lista.',
+      text: 'No logré identificar productos disponibles del menú. Toca el botón para ver la carta:',
+      reply_markup: {
+        inline_keyboard: [[{ text: '📋 Ver Menú / Carta', callback_data: 'show_menu' }]],
+      },
     })
     return
   }

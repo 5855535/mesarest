@@ -11,9 +11,9 @@ import {
   Mic,
   RotateCcw,
   Image as ImageIcon,
-  UploadCloud,
   Trash2,
   Loader2,
+  Plus,
 } from 'lucide-react'
 import { Skeleton } from '../components/Skeleton'
 import { supabase } from '../lib/supabase'
@@ -26,7 +26,7 @@ interface BusinessSettings {
   delivery_fee: number
   voice_replies_enabled: boolean
   memory_reorder_enabled: boolean
-  menu_image_url: string | null
+  menu_images: string[]
 }
 
 interface ProfileInfo {
@@ -63,6 +63,13 @@ export default function Settings() {
     ])
 
     if (s.data) {
+      let images: string[] = []
+      if (Array.isArray(s.data.menu_images)) {
+        images = s.data.menu_images.slice(0, 3)
+      } else if (s.data.menu_image_url) {
+        images = [s.data.menu_image_url]
+      }
+
       setSettings({
         name: s.data.name,
         phone: s.data.phone,
@@ -71,7 +78,7 @@ export default function Settings() {
         delivery_fee: Number(s.data.delivery_fee),
         voice_replies_enabled: s.data.voice_replies_enabled ?? true,
         memory_reorder_enabled: s.data.memory_reorder_enabled ?? true,
-        menu_image_url: s.data.menu_image_url ?? null,
+        menu_images: images,
       })
     }
 
@@ -124,39 +131,68 @@ export default function Settings() {
     window.open(`https://wa.me/?text=${msg}`, '_blank')
   }
 
+  // Manejo de carga y compresión de hasta 3 fotos del menú
   const handleMenuImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file || !settings) return
+    const files = e.target.files
+    if (!files || files.length === 0 || !settings) return
+
+    if (settings.menu_images.length >= 3) {
+      setError('Ya has alcanzado el límite de 3 imágenes para el menú.')
+      return
+    }
 
     setCompressing(true)
-    const reader = new FileReader()
-    reader.onload = (re) => {
-      const img = new Image()
-      img.onload = () => {
-        const canvas = document.createElement('canvas')
-        let width = img.width
-        let height = img.height
-        const maxDim = 1400
-        if (width > maxDim || height > maxDim) {
-          if (width > height) {
-            height = Math.round((height * maxDim) / width)
-            width = maxDim
-          } else {
-            width = Math.round((width * maxDim) / height)
-            height = maxDim
+    setError(null)
+
+    const remainingSlots = 3 - settings.menu_images.length
+    const filesToProcess = Array.from(files).slice(0, remainingSlots)
+
+    let processedCount = 0
+    const newCompressedImages: string[] = []
+
+    filesToProcess.forEach((file) => {
+      const reader = new FileReader()
+      reader.onload = (re) => {
+        const img = new Image()
+        img.onload = () => {
+          const canvas = document.createElement('canvas')
+          let width = img.width
+          let height = img.height
+          const maxDim = 1400
+          if (width > maxDim || height > maxDim) {
+            if (width > height) {
+              height = Math.round((height * maxDim) / width)
+              width = maxDim
+            } else {
+              width = Math.round((width * maxDim) / height)
+              height = maxDim
+            }
+          }
+          canvas.width = width
+          canvas.height = height
+          const ctx = canvas.getContext('2d')
+          ctx?.drawImage(img, 0, 0, width, height)
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.8)
+          newCompressedImages.push(compressedDataUrl)
+
+          processedCount++
+          if (processedCount === filesToProcess.length) {
+            const updated = [...settings.menu_images, ...newCompressedImages].slice(0, 3)
+            setSettings({ ...settings, menu_images: updated })
+            setCompressing(false)
+            if (menuInputRef.current) menuInputRef.current.value = ''
           }
         }
-        canvas.width = width
-        canvas.height = height
-        const ctx = canvas.getContext('2d')
-        ctx?.drawImage(img, 0, 0, width, height)
-        const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.8)
-        setSettings({ ...settings, menu_image_url: compressedDataUrl })
-        setCompressing(false)
+        img.src = re.target?.result as string
       }
-      img.src = re.target?.result as string
-    }
-    reader.readAsDataURL(file)
+      reader.readAsDataURL(file)
+    })
+  }
+
+  const removeMenuImage = (indexToRemove: number) => {
+    if (!settings) return
+    const updated = settings.menu_images.filter((_, idx) => idx !== indexToRemove)
+    setSettings({ ...settings, menu_images: updated })
   }
 
   const saveSettings = async (e: React.FormEvent) => {
@@ -174,7 +210,8 @@ export default function Settings() {
         delivery_fee: Number(settings.delivery_fee),
         voice_replies_enabled: settings.voice_replies_enabled,
         memory_reorder_enabled: settings.memory_reorder_enabled,
-        menu_image_url: settings.menu_image_url || null,
+        menu_images: settings.menu_images,
+        menu_image_url: settings.menu_images[0] || null,
       })
       .eq('id', true)
 
@@ -391,7 +428,7 @@ export default function Settings() {
                       Memoria de Cliente y &quot;Lo mismo de siempre&quot;
                     </p>
                     <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
-                      El bot recordará la dirección habitual del cliente y sugerirá repetir su último pedido cuando salude o diga &quot;lo de siempre&quot;.
+                      El bot recuerda la dirección habitual del cliente y sugiere repetir su último pedido al saludar o cuando pida &quot;lo de siempre&quot;.
                     </p>
                   </div>
                 </div>
@@ -405,18 +442,22 @@ export default function Settings() {
                 />
               </div>
 
-              {/* Opción C: Subida de Foto oficial de la carta */}
-              <div className="space-y-2.5 p-4 rounded-xl bg-zinc-950/80 border border-zinc-800">
+              {/* Opción C: Subida de hasta 3 fotos oficiales de la carta */}
+              <div className="space-y-3 p-4 rounded-xl bg-zinc-950/80 border border-zinc-800">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <ImageIcon className="h-4 w-4 text-amber-400" />
                     <label className="text-xs font-bold text-zinc-200">
-                      Foto Oficial de la Carta / Menú para el Bot (/menu)
+                      Fotos de la Carta / Menú para el Bot (Hasta 3 imágenes)
                     </label>
                   </div>
+                  <span className="text-[11px] font-mono font-bold bg-zinc-800 text-amber-400 px-2 py-0.5 rounded border border-zinc-700/60">
+                    {settings.menu_images.length}/3 fotos
+                  </span>
                 </div>
+
                 <p className="text-[11px] text-zinc-400 leading-relaxed">
-                  Sube una foto de tu menú o volante. Cuando los clientes escriban /menu o pidan la carta por el bot, se les enviará esta foto directamente.
+                  Sube hasta 3 fotos de tu carta o volante (ej: Hamburguesas, Perros, Bebidas). Cuando los clientes saluden o pidan el menú, el bot les enviará estas fotos directamente.
                 </p>
 
                 <input
@@ -424,67 +465,62 @@ export default function Settings() {
                   ref={menuInputRef}
                   onChange={handleMenuImageUpload}
                   accept="image/*"
+                  multiple
                   className="hidden"
                 />
 
-                {settings.menu_image_url ? (
-                  <div className="flex flex-col sm:flex-row items-center gap-3.5 p-3 rounded-xl bg-zinc-900 border border-zinc-800">
-                    <div className="h-28 w-28 shrink-0 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950 flex items-center justify-center">
-                      <img
-                        src={settings.menu_image_url}
-                        alt="Menú cargado"
-                        className="h-full w-full object-cover"
-                      />
-                    </div>
-                    <div className="flex-1 space-y-2 text-center sm:text-left">
-                      <p className="text-xs font-semibold text-emerald-400 flex items-center justify-center sm:justify-start gap-1.5">
-                        <Check className="h-3.5 w-3.5" />
-                        <span>Foto de la carta cargada</span>
-                      </p>
-                      <p className="text-[11px] text-zinc-400 font-mono">
-                        Recuerda hacer clic en &quot;Guardar cambios&quot; abajo para aplicarla.
-                      </p>
-                      <div className="flex items-center justify-center sm:justify-start gap-2 pt-1">
+                {/* Grilla de 3 slots */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                  {settings.menu_images.map((imgUrl, idx) => (
+                    <div
+                      key={idx}
+                      className="relative rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden flex flex-col justify-between group shadow-sm"
+                    >
+                      <div className="h-36 w-full bg-zinc-950 flex items-center justify-center overflow-hidden">
+                        <img
+                          src={imgUrl}
+                          alt={`Menú ${idx + 1}`}
+                          className="h-full w-full object-cover"
+                        />
+                      </div>
+                      <div className="p-2 bg-zinc-900/90 border-t border-zinc-800 flex items-center justify-between text-xs">
+                        <span className="font-mono text-[11px] font-bold text-zinc-300">
+                          Página {idx + 1} de {settings.menu_images.length}
+                        </span>
                         <button
                           type="button"
-                          onClick={() => menuInputRef.current?.click()}
-                          className="rounded-lg bg-zinc-800 hover:bg-zinc-750 text-zinc-200 text-xs font-semibold px-3 py-1.5 transition border border-zinc-700"
+                          onClick={() => removeMenuImage(idx)}
+                          title="Eliminar esta foto"
+                          className="rounded p-1 text-red-400 hover:text-red-300 hover:bg-red-950/60 transition"
                         >
-                          Cambiar foto
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setSettings({ ...settings, menu_image_url: null })}
-                          className="rounded-lg bg-red-950/60 hover:bg-red-900/60 text-red-300 text-xs font-semibold px-3 py-1.5 transition border border-red-800/60 flex items-center gap-1"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                          <span>Eliminar</span>
+                          <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     </div>
-                  </div>
-                ) : (
-                  <div
-                    onClick={() => menuInputRef.current?.click()}
-                    className="cursor-pointer rounded-xl border border-dashed border-zinc-700 hover:border-zinc-500 bg-zinc-900/60 p-6 text-center space-y-2 transition"
-                  >
-                    <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-800 text-zinc-300">
-                      {compressing ? (
-                        <Loader2 className="h-5 w-5 animate-spin text-emerald-400" />
-                      ) : (
-                        <UploadCloud className="h-5 w-5" />
-                      )}
+                  ))}
+
+                  {/* Slot para agregar más fotos si no ha llegado al límite de 3 */}
+                  {settings.menu_images.length < 3 && (
+                    <div
+                      onClick={() => menuInputRef.current?.click()}
+                      className="h-44 cursor-pointer rounded-xl border border-dashed border-zinc-700 hover:border-zinc-500 bg-zinc-900/40 hover:bg-zinc-900/80 p-4 text-center flex flex-col items-center justify-center gap-2 transition"
+                    >
+                      <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-800 text-zinc-300">
+                        {compressing ? (
+                          <Loader2 className="h-4 w-4 animate-spin text-emerald-400" />
+                        ) : (
+                          <Plus className="h-4 w-4 text-emerald-400" />
+                        )}
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-zinc-200">
+                          {compressing ? 'Optimizando...' : `Subir Foto ${settings.menu_images.length + 1} de 3`}
+                        </p>
+                        <p className="text-[10px] text-zinc-500 mt-0.5">JPG o PNG desde tu dispositivo</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-xs font-bold text-zinc-200">
-                        {compressing ? 'Optimizando foto...' : 'Haz clic para subir la foto de la carta'}
-                      </p>
-                      <p className="text-[11px] text-zinc-500">
-                        Formatos JPG o PNG desde tu celular, tablet o PC
-                      </p>
-                    </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             </div>
           </section>
