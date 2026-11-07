@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Bell, BellOff, Undo2, ArrowRight } from 'lucide-react'
+import {
+  Bell,
+  BellOff,
+  Undo2,
+  ArrowRight,
+  Flame,
+  CheckCheck,
+  Maximize2,
+  Minimize2,
+  HelpCircle,
+} from 'lucide-react'
 import { CardSkeleton } from '../components/Skeleton'
+import { SwipeableCard } from '../components/SwipeableCard'
 import { supabase } from '../lib/supabase'
 
 type KStatus = 'nuevo' | 'preparando' | 'listo'
@@ -31,7 +42,7 @@ const SELECT =
   'order_items(id, product_name, quantity, notes, excluded_ingredients, order_item_modifiers(id, name))'
 
 function typeBadge(o: KOrder) {
-  if (o.delivery_type === 'mesa') return `MESA ${o.table_label}`
+  if (o.delivery_type === 'mesa') return `MESA ${o.table_label || '?'}`
   return o.delivery_type === 'domicilio' ? 'DOMICILIO' : 'LLEVAR'
 }
 
@@ -66,8 +77,8 @@ export default function Kitchen() {
   const [sound, setSound] = useState(() => localStorage.getItem('kitchen-sound') === '1')
   const [flash, setFlash] = useState<Set<string>>(new Set())
   const [busyId, setBusyId] = useState<string | null>(null)
-
   const [view, setView] = useState<'activos' | 'listos'>('activos')
+  const [isFullscreen, setIsFullscreen] = useState(false)
 
   const seen = useRef<Set<string> | null>(null)
   const soundRef = useRef(sound)
@@ -124,11 +135,15 @@ export default function Kitchen() {
     const onVisible = () => document.visibilityState === 'visible' && load()
     document.addEventListener('visibilitychange', onVisible)
 
+    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onFsChange)
+
     return () => {
       clearTimeout(timer)
       clearInterval(poll)
       clearInterval(tick)
       document.removeEventListener('visibilitychange', onVisible)
+      document.removeEventListener('fullscreenchange', onFsChange)
       supabase.removeChannel(channel)
     }
   }, [load])
@@ -140,6 +155,17 @@ export default function Kitchen() {
     if (next) beep()
   }
 
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen?.().catch(() => {})
+      setIsFullscreen(true)
+    } else {
+      document.exitFullscreen?.().catch(() => {})
+      setIsFullscreen(false)
+    }
+  }
+
+  // Avance optimista instantáneo (0 ms lag)
   const advance = async (o: KOrder) => {
     const next: KStatus | null =
       o.status === 'nuevo' ? 'preparando' : o.status === 'preparando' ? 'listo' : null
@@ -147,190 +173,291 @@ export default function Kitchen() {
 
     setBusyId(o.id)
     setError(null)
-    const { error } = await supabase.rpc('set_order_status', {
+
+    setOrders((prev) =>
+      prev.map((item) => (item.id === o.id ? { ...item, status: next } : item)),
+    )
+
+    const { error: err } = await supabase.rpc('set_order_status', {
       p_order_id: o.id,
       p_new_status: next,
     })
-    if (error) setError(error.message)
-    await load()
+
+    if (err) {
+      setError(err.message)
+      await load()
+    }
     setBusyId(null)
   }
 
-  const rewind = async (e: React.MouseEvent, o: KOrder) => {
-    e.stopPropagation()
+  // Retroceso optimista instantáneo
+  const rewind = async (o: KOrder) => {
     const prev: KStatus | null =
       o.status === 'listo' ? 'preparando' : o.status === 'preparando' ? 'nuevo' : null
     if (!prev) return
 
     setBusyId(o.id)
     setError(null)
-    const { error } = await supabase.rpc('set_order_status', {
+
+    setOrders((list) =>
+      list.map((item) => (item.id === o.id ? { ...item, status: prev } : item)),
+    )
+
+    const { error: err } = await supabase.rpc('set_order_status', {
       p_order_id: o.id,
       p_new_status: prev,
     })
-    if (error) setError(error.message)
-    await load()
+
+    if (err) {
+      setError(err.message)
+      await load()
+    }
     setBusyId(null)
   }
 
-  const minutes = (o: KOrder) => Math.max(0, Math.floor((now - new Date(o.created_at).getTime()) / 60000))
+  const minutes = (o: KOrder) =>
+    Math.max(0, Math.floor((now - new Date(o.created_at).getTime()) / 60000))
 
   const nuevos = orders.filter((o) => o.status === 'nuevo')
   const preparando = orders.filter((o) => o.status === 'preparando')
   const listos = orders.filter((o) => o.status === 'listo')
 
   return (
-    <div className="space-y-4">
-      {/* Barra de control superior minimalista */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="space-y-3.5">
+      {/* Barra de control superior para Tablet */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex items-center gap-3">
-          <h1 className="text-xl font-bold font-mono tracking-tight text-zinc-100">COCINA</h1>
+          <h1 className="text-xl md:text-2xl font-black font-mono tracking-tight text-zinc-100 flex items-center gap-2">
+            <Flame className="h-5 w-5 text-emerald-400" />
+            <span>COCINA</span>
+          </h1>
           <span className="flex items-center gap-1.5 text-xs text-zinc-400 font-mono">
-            <span className={`h-2 w-2 rounded-full ${live ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50' : 'bg-red-500'}`} />
-            {live ? 'EN VIVO' : 'RECONECTANDO'}
+            <span
+              className={`h-2.5 w-2.5 rounded-full ${
+                live ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50 animate-pulse' : 'bg-red-500'
+              }`}
+            />
+            <span className="hidden sm:inline">{live ? 'EN VIVO' : 'RECONECTANDO'}</span>
           </span>
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Selector Activos / Archivados */}
+          {/* Selector de Vistas: Activos vs Listos */}
           <div className="grid grid-cols-2 rounded-xl bg-zinc-900 border border-zinc-800 p-0.5 text-xs font-semibold">
             <button
               onClick={() => setView('activos')}
-              className={`rounded-lg px-3 py-1.5 transition ${
-                view === 'activos' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+              className={`rounded-lg px-3 py-1.5 transition flex items-center gap-1.5 ${
+                view === 'activos'
+                  ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700/60'
+                  : 'text-zinc-400 hover:text-zinc-200'
               }`}
             >
-              En Cocina ({nuevos.length + preparando.length})
+              <span>En Cocina</span>
+              <span className="rounded bg-zinc-700/80 px-1.5 py-0.2 text-[10px] font-mono">
+                {nuevos.length + preparando.length}
+              </span>
             </button>
             <button
               onClick={() => setView('listos')}
-              className={`rounded-lg px-3 py-1.5 transition ${
-                view === 'listos' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+              className={`rounded-lg px-3 py-1.5 transition flex items-center gap-1.5 ${
+                view === 'listos'
+                  ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700/60'
+                  : 'text-zinc-400 hover:text-zinc-200'
               }`}
             >
-              Listos ({listos.length})
+              <span>Listos</span>
+              <span className="rounded bg-zinc-700/80 px-1.5 py-0.2 text-[10px] font-mono">
+                {listos.length}
+              </span>
             </button>
           </div>
 
+          {/* Timbre Sonoro */}
           <button
             onClick={toggleSound}
-            title={sound ? 'Silenciar alarma' : 'Activar sonido'}
-            className={`rounded-xl p-2 text-sm transition border ${
+            title={sound ? 'Silenciar alarma' : 'Activar timbre sonoro'}
+            className={`rounded-xl p-2.5 text-sm transition border ${
               sound
-                ? 'bg-zinc-800 border-zinc-700 text-zinc-100'
+                ? 'bg-zinc-800 border-zinc-700 text-emerald-400 shadow-sm'
                 : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300'
             }`}
           >
             {sound ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
           </button>
+
+          {/* Botón Pantalla Completa para Tablet */}
+          <button
+            onClick={toggleFullscreen}
+            title={isFullscreen ? 'Salir de pantalla completa' : 'Pantalla completa para Tablet'}
+            className="rounded-xl p-2.5 text-sm transition border bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+          >
+            {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+          </button>
         </div>
       </div>
 
-      {error && <p className="rounded-lg bg-red-950/60 border border-red-800/60 p-3 text-xs text-red-300 font-mono">{error}</p>}
+      {/* Sugerencia táctil */}
+      <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 bg-zinc-900/60 border border-zinc-800/80 rounded-xl px-3.5 py-1.5">
+        <span className="flex items-center gap-2">
+          <HelpCircle className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+          <span>
+            <strong className="text-zinc-200">En Tablet:</strong> Desliza{' '}
+            <strong className="text-emerald-400">👉 a la derecha</strong> para avanzar o{' '}
+            <strong className="text-amber-400">👈 a la izquierda</strong> para retroceder.
+          </span>
+        </span>
+      </div>
+
+      {error && (
+        <p className="rounded-xl bg-red-950/60 border border-red-800/60 p-3 text-xs text-red-300 font-mono">
+          {error}
+        </p>
+      )}
 
       {/* Skeletons durante carga */}
       {loading ? (
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-3.5 grid-cols-1 landscape:grid-cols-2 md:grid-cols-2">
           <CardSkeleton count={2} />
           <CardSkeleton count={2} />
         </div>
       ) : view === 'activos' ? (
-        <div className="grid gap-3.5 md:grid-cols-2">
-          {/* NUEVOS */}
-          <section className="space-y-3 rounded-2xl bg-zinc-900/50 p-3 border border-zinc-800/80">
+        /* En horizontal (landscape) o en pantallas md: SIEMPRE quedan 2 columnas lado a lado (horizontal) */
+        <div className="grid grid-cols-1 landscape:grid-cols-2 md:grid-cols-2 gap-3.5 items-start">
+          {/* COLUMNA 1: NUEVOS (Izquierda) */}
+          <section className="space-y-3 rounded-2xl bg-zinc-900/40 p-3 border border-zinc-800/80">
             <header className="flex items-center justify-between px-1">
               <span className="text-xs font-bold font-mono tracking-wider text-sky-400 uppercase flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-sky-400" />
-                Nuevos
+                <span className="h-2 w-2 rounded-full bg-sky-400 animate-pulse" />
+                1. Nuevos por Preparar
               </span>
-              <span className="rounded bg-zinc-800 px-2 py-0.5 text-xs font-mono font-bold text-zinc-300">
+              <span className="rounded-lg bg-sky-950/60 border border-sky-800/60 px-2 py-0.5 text-xs font-mono font-bold text-sky-300">
                 {nuevos.length}
               </span>
             </header>
 
             {nuevos.length === 0 && (
-              <p className="py-14 text-center text-xs font-mono text-zinc-600">SIN PEDIDOS NUEVOS</p>
+              <div className="py-16 text-center border border-dashed border-zinc-800/80 rounded-xl">
+                <p className="text-xs font-mono text-zinc-600">SIN PEDIDOS NUEVOS</p>
+              </div>
             )}
 
-            <div className="space-y-2.5">
+            <div className="space-y-3">
               {nuevos.map((o) => (
-                <KitchenCard
+                <SwipeableCard
                   key={o.id}
-                  order={o}
-                  minutes={minutes(o)}
-                  isFlashing={flash.has(o.id)}
-                  isBusy={busyId === o.id}
+                  onSwipeRight={() => advance(o)}
                   onClick={() => advance(o)}
-                  actionText="PREPARAR"
-                />
+                  swipeRightLabel="Preparar"
+                  swipeRightIcon={<Flame className="h-5 w-5" />}
+                  threshold={85}
+                  disabled={busyId === o.id}
+                >
+                  <KitchenCard
+                    order={o}
+                    minutes={minutes(o)}
+                    isFlashing={flash.has(o.id)}
+                    isBusy={busyId === o.id}
+                    actionText="DESLIZA 👉 PREPARAR"
+                  />
+                </SwipeableCard>
               ))}
             </div>
           </section>
 
-          {/* PREPARANDO */}
-          <section className="space-y-3 rounded-2xl bg-zinc-900/50 p-3 border border-zinc-800/80">
+          {/* COLUMNA 2: PREPARANDO (Derecha) */}
+          <section className="space-y-3 rounded-2xl bg-zinc-900/40 p-3 border border-zinc-800/80">
             <header className="flex items-center justify-between px-1">
               <span className="text-xs font-bold font-mono tracking-wider text-amber-400 uppercase flex items-center gap-2">
                 <span className="h-2 w-2 rounded-full bg-amber-400" />
-                En Preparación
+                2. En Preparación
               </span>
-              <span className="rounded bg-zinc-800 px-2 py-0.5 text-xs font-mono font-bold text-zinc-300">
+              <span className="rounded-lg bg-amber-950/60 border border-amber-800/60 px-2 py-0.5 text-xs font-mono font-bold text-amber-300">
                 {preparando.length}
               </span>
             </header>
 
             {preparando.length === 0 && (
-              <p className="py-14 text-center text-xs font-mono text-zinc-600">NADA EN PREPARACIÓN</p>
+              <div className="py-16 text-center border border-dashed border-zinc-800/80 rounded-xl">
+                <p className="text-xs font-mono text-zinc-600">NADA EN PREPARACIÓN</p>
+              </div>
             )}
 
-            <div className="space-y-2.5">
+            <div className="space-y-3">
               {preparando.map((o) => (
-                <KitchenCard
+                <SwipeableCard
                   key={o.id}
-                  order={o}
-                  minutes={minutes(o)}
-                  isFlashing={flash.has(o.id)}
-                  isBusy={busyId === o.id}
+                  onSwipeRight={() => advance(o)}
+                  onSwipeLeft={() => rewind(o)}
                   onClick={() => advance(o)}
-                  onRewind={(e) => rewind(e, o)}
-                  actionText="MARCAR LISTO"
-                />
+                  swipeRightLabel="Listo"
+                  swipeRightIcon={<CheckCheck className="h-5 w-5" />}
+                  swipeLeftLabel="Regresar a Nuevos"
+                  swipeLeftIcon={<Undo2 className="h-5 w-5" />}
+                  threshold={85}
+                  disabled={busyId === o.id}
+                >
+                  <KitchenCard
+                    order={o}
+                    minutes={minutes(o)}
+                    isFlashing={flash.has(o.id)}
+                    isBusy={busyId === o.id}
+                    onRewind={(e) => {
+                      e.stopPropagation()
+                      rewind(o)
+                    }}
+                    actionText="DESLIZA 👉 LISTO"
+                  />
+                </SwipeableCard>
               ))}
             </div>
           </section>
         </div>
       ) : (
         /* VISTA LISTOS / ARCHIVADOS */
-        <section className="space-y-2.5 max-w-2xl mx-auto">
+        <section className="space-y-3 max-w-2xl mx-auto">
           {listos.length === 0 && (
-            <p className="py-16 text-center text-xs font-mono text-zinc-600">NO HAY PEDIDOS LISTOS</p>
+            <div className="py-16 text-center border border-dashed border-zinc-800/80 rounded-xl">
+              <p className="text-xs font-mono text-zinc-600">NO HAY PEDIDOS LISTOS</p>
+            </div>
           )}
           {listos.map((o) => (
-            <div
+            <SwipeableCard
               key={o.id}
-              className="flex items-center justify-between rounded-xl bg-zinc-900 p-3.5 border border-zinc-800 text-sm"
+              onSwipeLeft={() => rewind(o)}
+              swipeLeftLabel="Regresar a Preparación"
+              swipeLeftIcon={<Undo2 className="h-5 w-5" />}
+              threshold={85}
+              disabled={busyId === o.id}
             >
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono font-bold text-zinc-100">#{o.order_number}</span>
-                  <span className="text-[10px] uppercase font-mono font-bold bg-zinc-800 text-zinc-400 px-1.5 py-0.5 rounded">
-                    {typeBadge(o)}
-                  </span>
+              <div className="flex items-center justify-between rounded-xl bg-zinc-900 p-4 border border-zinc-800 text-sm shadow-md">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-black text-base text-zinc-100">
+                      #{o.order_number}
+                    </span>
+                    <span className="text-[10px] uppercase font-mono font-bold bg-zinc-800 text-zinc-300 px-2 py-0.5 rounded border border-zinc-700/60">
+                      {typeBadge(o)}
+                    </span>
+                  </div>
+                  <p className="text-xs text-zinc-400 mt-1.5 font-medium">
+                    {o.order_items.map((it) => `${it.quantity}x ${it.product_name}`).join(', ')}
+                  </p>
+                  {o.notes && <p className="text-xs text-zinc-500 italic mt-0.5">“{o.notes}”</p>}
                 </div>
-                <p className="text-xs text-zinc-400 mt-1">
-                  {o.order_items.map((it) => `${it.quantity}x ${it.product_name}`).join(', ')}
-                </p>
-              </div>
 
-              <button
-                onClick={(e) => rewind(e, o)}
-                disabled={busyId === o.id}
-                className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:text-white flex items-center gap-1"
-              >
-                <Undo2 className="h-3 w-3" />
-                <span>Regresar</span>
-              </button>
-            </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    rewind(o)
+                  }}
+                  disabled={busyId === o.id}
+                  className="rounded-xl border border-zinc-700 bg-zinc-800 px-3.5 py-2 text-xs font-bold text-zinc-300 hover:text-white hover:bg-zinc-700 transition flex items-center gap-1.5 shrink-0"
+                >
+                  <Undo2 className="h-3.5 w-3.5" />
+                  <span>Regresar</span>
+                </button>
+              </div>
+            </SwipeableCard>
           ))}
         </section>
       )}
@@ -343,7 +470,6 @@ function KitchenCard({
   minutes: mins,
   isFlashing,
   isBusy,
-  onClick,
   onRewind,
   actionText,
 }: {
@@ -351,30 +477,31 @@ function KitchenCard({
   minutes: number
   isFlashing: boolean
   isBusy: boolean
-  onClick: () => void
   onRewind?: (e: React.MouseEvent) => void
   actionText: string
 }) {
-  const late = mins >= 20
-  const warn = mins >= 10
+  const late = mins >= 18
+  const warn = mins >= 10 && mins < 18
 
   return (
     <article
-      onClick={isBusy ? undefined : onClick}
-      className={`group relative cursor-pointer select-none rounded-xl bg-zinc-900 p-4 transition active:scale-[0.99] border ${
+      className={`group relative rounded-2xl bg-zinc-900 p-4 md:p-5 transition border shadow-lg ${
         isFlashing
-          ? 'animate-pulse border-sky-400 bg-sky-950/20 shadow-md'
+          ? 'animate-pulse border-sky-400 bg-sky-950/25 ring-2 ring-sky-400/40'
           : late
-            ? 'border-red-500/70 bg-red-950/10'
+            ? 'border-red-500/80 bg-red-950/15 ring-1 ring-red-500/30'
             : warn
-              ? 'border-amber-500/60 bg-amber-950/10'
+              ? 'border-amber-500/70 bg-amber-950/15'
               : 'border-zinc-800 hover:border-zinc-700'
-      } ${isBusy ? 'opacity-40' : ''}`}
+      } ${isBusy ? 'opacity-40 pointer-events-none' : ''}`}
     >
-      <div className="flex items-start justify-between">
-        <div>
-          <span className="text-2xl font-black font-mono tracking-tight text-white">#{o.order_number}</span>
-          <span className="ml-2.5 rounded bg-zinc-800 border border-zinc-700/80 px-2 py-0.5 text-[11px] font-mono font-bold text-zinc-300">
+      {/* Cabecera del ticket con número grande y badge */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex items-center gap-2.5">
+          <span className="text-3xl font-black font-mono tracking-tight text-white">
+            #{o.order_number}
+          </span>
+          <span className="rounded-lg bg-zinc-800 border border-zinc-700/80 px-2.5 py-1 text-xs font-mono font-bold text-zinc-200">
             {typeBadge(o)}
           </span>
         </div>
@@ -383,56 +510,71 @@ function KitchenCard({
           {onRewind && (
             <button
               onClick={onRewind}
-              title="Regresar"
-              className="rounded p-1 text-zinc-500 hover:text-zinc-200"
+              title="Regresar a Nuevos"
+              className="rounded-lg p-1.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition"
             >
-              <Undo2 className="h-3.5 w-3.5" />
+              <Undo2 className="h-4 w-4" />
             </button>
           )}
           <span
-            className={`font-mono text-xs font-bold px-2 py-0.5 rounded ${
-              late ? 'bg-red-500/20 text-red-400' : warn ? 'bg-amber-500/20 text-amber-400' : 'bg-zinc-800 text-zinc-400'
+            className={`font-mono text-xs font-bold px-2.5 py-1 rounded-lg border ${
+              late
+                ? 'bg-red-500/20 text-red-300 border-red-500/50 animate-pulse'
+                : warn
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                  : 'bg-zinc-800 text-zinc-400 border-zinc-700/60'
             }`}
           >
-            {mins}m
+            {mins} min
           </span>
         </div>
       </div>
 
-      <ul className="mt-3 space-y-1.5 border-t border-zinc-800/80 pt-2.5 text-sm">
+      {/* Lista de productos limpia y destacada */}
+      <ul className="mt-3.5 space-y-2 border-t border-zinc-800/80 pt-3 text-sm">
         {o.order_items.map((it) => (
-          <li key={it.id}>
-            <p className="font-semibold text-zinc-100">
-              <span className="text-zinc-400 font-mono mr-1.5">{it.quantity}×</span>
+          <li key={it.id} className="rounded-lg p-1 text-zinc-100">
+            <p className="font-bold text-sm leading-snug">
+              <span className="font-mono mr-2 px-1.5 py-0.5 rounded text-xs bg-zinc-800 text-white font-black">
+                {it.quantity}×
+              </span>
               {it.product_name}
             </p>
+
             {it.excluded_ingredients.length > 0 && (
-              <p className="text-xs font-bold text-red-400">
-                SIN: {it.excluded_ingredients.join(', ')}
+              <p className="text-xs font-bold text-red-400 mt-1 pl-7">
+                🚫 SIN: {it.excluded_ingredients.join(', ')}
               </p>
             )}
+
             {it.order_item_modifiers.length > 0 && (
-              <p className="text-xs text-zinc-400">
+              <p className="text-xs text-sky-400 font-medium mt-0.5 pl-7">
                 + {it.order_item_modifiers.map((m) => m.name).join(', ')}
               </p>
             )}
-            {it.notes && <p className="text-xs italic text-zinc-400">“{it.notes}”</p>}
+
+            {it.notes && (
+              <p className="text-xs italic text-amber-300/90 mt-0.5 pl-7">“{it.notes}”</p>
+            )}
           </li>
         ))}
       </ul>
 
       {o.notes && (
-        <p className="mt-2.5 rounded bg-zinc-800/60 p-2 text-xs text-zinc-300 border border-zinc-700/40">
-          Nota: {o.notes}
-        </p>
+        <div className="mt-3 rounded-xl bg-amber-950/20 border border-amber-800/40 p-2.5 text-xs text-amber-200">
+          <strong className="uppercase font-mono text-[10px] tracking-wider text-amber-400 block mb-0.5">
+            Nota general del pedido:
+          </strong>
+          {o.notes}
+        </div>
       )}
 
-      {/* Pie táctil discreto con icono de flecha */}
-      <div className="mt-3 pt-2 border-t border-zinc-800/60 flex items-center justify-between text-[11px] font-mono">
-        <span className="text-zinc-500">1 toque = avanzar</span>
-        <span className="text-zinc-300 font-bold group-hover:text-white transition flex items-center gap-1">
+      {/* Pie táctil para tablet */}
+      <div className="mt-3.5 pt-2.5 border-t border-zinc-800/60 flex items-center justify-between text-[11px] font-mono">
+        <span className="text-zinc-500">1 toque o desliza</span>
+        <span className="text-emerald-400 font-bold flex items-center gap-1 group-hover:translate-x-1 transition-transform">
           <span>{actionText}</span>
-          <ArrowRight className="h-3 w-3" />
+          <ArrowRight className="h-3.5 w-3.5" />
         </span>
       </div>
     </article>

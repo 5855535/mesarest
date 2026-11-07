@@ -8,6 +8,7 @@ export interface NavItem {
 
 export const NAV: NavItem[] = [
   { to: '/panel', label: 'Panel', roles: ['admin'] },
+  { to: '/pos', label: 'Caja / POS', roles: ['admin', 'caja'] },
   { to: '/cocina', label: 'Cocina', roles: ['admin', 'cocina'] },
   { to: '/despacho', label: 'Despacho', roles: ['admin', 'despacho'] },
   { to: '/catalogo', label: 'Catálogo', roles: ['admin'] },

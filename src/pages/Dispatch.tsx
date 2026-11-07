@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { MessageCircle, Phone, MapPin, ExternalLink, Check, Bike } from 'lucide-react'
 import { CardSkeleton } from '../components/Skeleton'
+import { SwipeableCard } from '../components/SwipeableCard'
 import { money } from '../lib/format'
 import { supabase } from '../lib/supabase'
 
@@ -36,7 +37,7 @@ const waUrl = (phone: string, orderNum: number) => {
 }
 
 function typeBadge(o: DOrder) {
-  if (o.delivery_type === 'mesa') return `MESA ${o.table_label}`
+  if (o.delivery_type === 'mesa') return `MESA ${o.table_label || '?'}`
   return o.delivery_type === 'domicilio' ? 'DOMICILIO' : 'LLEVAR'
 }
 
@@ -87,6 +88,13 @@ export default function Dispatch() {
     setBusyId(o.id)
     setError(null)
 
+    // Actualización optimista inmediata
+    setActive((prev) => prev.filter((item) => item.id !== o.id))
+    setArchived((prev) => [
+      { ...o, status: 'entregado', delivered_at: new Date().toISOString() },
+      ...prev,
+    ])
+
     const { error: err } = await supabase.rpc('set_order_status', {
       p_order_id: o.id,
       p_new_status: 'entregado',
@@ -94,11 +102,8 @@ export default function Dispatch() {
 
     if (err) {
       setError(err.message)
-      setBusyId(null)
-      return
+      await load()
     }
-
-    await load()
     setBusyId(null)
   }
 
@@ -110,14 +115,16 @@ export default function Dispatch() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold font-mono tracking-tight text-zinc-100">DESPACHO</h1>
-          <p className="text-xs text-zinc-400">1 toque en la tarjeta para marcar salida del pedido</p>
+          <p className="text-xs text-zinc-400">Desliza o toca para marcar salida / entrega</p>
         </div>
 
         <div className="grid grid-cols-2 rounded-xl bg-zinc-900 border border-zinc-800 p-0.5 text-xs font-semibold">
           <button
             onClick={() => setTab('activos')}
             className={`rounded-lg px-3 py-1.5 transition ${
-              tab === 'activos' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+              tab === 'activos'
+                ? 'bg-zinc-800 text-white shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200'
             }`}
           >
             Listos ({active.length})
@@ -125,7 +132,9 @@ export default function Dispatch() {
           <button
             onClick={() => setTab('archivados')}
             className={`rounded-lg px-3 py-1.5 transition ${
-              tab === 'archivados' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+              tab === 'archivados'
+                ? 'bg-zinc-800 text-white shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200'
             }`}
           >
             Salidos ({archived.length})
@@ -133,7 +142,11 @@ export default function Dispatch() {
         </div>
       </div>
 
-      {error && <p className="rounded-lg bg-red-950/60 border border-red-800/60 p-3 text-xs text-red-300 font-mono">{error}</p>}
+      {error && (
+        <p className="rounded-lg bg-red-950/60 border border-red-800/60 p-3 text-xs text-red-300 font-mono">
+          {error}
+        </p>
+      )}
 
       {loading ? (
         <CardSkeleton count={4} />
@@ -151,27 +164,30 @@ export default function Dispatch() {
             const isBusy = busyId === o.id
             const isArchived = o.status === 'entregado'
 
-            return (
+            const cardContent = (
               <article
-                key={o.id}
                 onClick={isArchived || isBusy ? undefined : () => markOut(o)}
-                className={`group relative flex flex-col justify-between rounded-xl bg-zinc-900 p-4 transition select-none border ${
+                className={`group relative flex flex-col justify-between rounded-2xl bg-zinc-900 p-4 transition select-none border ${
                   isArchived
                     ? 'opacity-50 border-zinc-800/60 cursor-default'
-                    : 'border-zinc-800 hover:border-zinc-700 cursor-pointer active:scale-[0.99]'
+                    : 'border-zinc-800 hover:border-zinc-700 cursor-pointer active:scale-[0.99] shadow-md'
                 } ${isBusy ? 'opacity-30' : ''}`}
               >
                 <div>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <span className="text-2xl font-black font-mono text-zinc-100">#{o.order_number}</span>
+                      <span className="text-2xl font-black font-mono text-zinc-100">
+                        #{o.order_number}
+                      </span>
                       <span className="rounded bg-zinc-800 border border-zinc-700/80 px-2 py-0.5 text-[11px] font-mono font-bold text-zinc-300">
                         {typeBadge(o)}
                       </span>
                     </div>
 
                     <div className="text-right">
-                      <p className="text-base font-extrabold font-mono text-zinc-100">{money(Number(o.total))}</p>
+                      <p className="text-base font-extrabold font-mono text-zinc-100">
+                        {money(Number(o.total))}
+                      </p>
                       {cash && !isArchived && (
                         <span className="rounded bg-amber-500/20 text-amber-300 text-[10px] font-mono font-bold px-1.5 py-0.5 uppercase">
                           Cobrar efectivo
@@ -181,12 +197,15 @@ export default function Dispatch() {
                   </div>
 
                   {(o.customer || o.delivery_address) && (
-                    <div className="mt-2.5 rounded-lg bg-zinc-950/60 p-2.5 text-xs space-y-1.5 border border-zinc-800/80">
+                    <div className="mt-2.5 rounded-xl bg-zinc-950/60 p-2.5 text-xs space-y-1.5 border border-zinc-800/80">
                       {o.customer?.full_name && (
                         <p className="font-bold text-zinc-200">{o.customer.full_name}</p>
                       )}
 
-                      <div className="flex flex-wrap items-center gap-2 pt-0.5" onClick={(e) => e.stopPropagation()}>
+                      <div
+                        className="flex flex-wrap items-center gap-2 pt-0.5"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         {o.customer?.phone && (
                           <a
                             href={waUrl(o.customer.phone, o.order_number)}
@@ -235,14 +254,16 @@ export default function Dispatch() {
                     <p className="line-clamp-2 font-medium">
                       {o.order_items?.map((it) => `${it.quantity}x ${it.product_name}`).join(' · ')}
                     </p>
-                    {o.notes && <p className="text-[11px] italic text-zinc-400 mt-1">Nota: {o.notes}</p>}
+                    {o.notes && (
+                      <p className="text-[11px] italic text-zinc-400 mt-1">Nota: {o.notes}</p>
+                    )}
                   </div>
                 </div>
 
                 {!isArchived && (
                   <div className="mt-3.5 pt-2 border-t border-zinc-800/60 flex items-center justify-between text-[11px] font-mono">
                     <span className="text-zinc-500">
-                      {isBusy ? 'Notificando salida...' : '1 toque = salida'}
+                      {isBusy ? 'Notificando salida...' : 'Desliza 👉 o toca'}
                     </span>
                     <span className="text-emerald-400 font-bold group-hover:text-emerald-300 transition flex items-center gap-1.5">
                       {isDelivery ? (
@@ -260,6 +281,24 @@ export default function Dispatch() {
                   </div>
                 )}
               </article>
+            )
+
+            if (isArchived) {
+              return <div key={o.id}>{cardContent}</div>
+            }
+
+            return (
+              <SwipeableCard
+                key={o.id}
+                onSwipeRight={() => markOut(o)}
+                onClick={() => markOut(o)}
+                swipeRightLabel={isDelivery ? 'Marcar En Camino' : 'Entregar'}
+                swipeRightIcon={isDelivery ? <Bike className="h-5 w-5" /> : <Check className="h-5 w-5" />}
+                threshold={85}
+                disabled={isBusy}
+              >
+                {cardContent}
+              </SwipeableCard>
             )
           })}
         </div>
