@@ -1,4 +1,4 @@
-// Supabase Edge Function: telegram-webhook con IA (Gemini 2.5 Flash), Memoria de Cliente y Notas de Voz
+// Supabase Edge Function: telegram-webhook con IA (Gemini 2.5 Flash), GPS/Ubicación en tiempo real, Memoria de Cliente y Notas de Voz
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.48.1'
 import {
   parseQuickOrder,
@@ -83,6 +83,33 @@ async function downloadTelegramAudio(fileId: string): Promise<{ base64: string; 
     console.error('Error descargando audio de Telegram:', err)
     return null
   }
+}
+
+// Geocodificación inversa gratuita con OpenStreetMap Nominatim
+async function reverseGeocode(lat: number, lon: number): Promise<{ address: string; mapsUrl: string }> {
+  const mapsUrl = `https://maps.google.com/?q=${lat},${lon}`
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1`
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'RestaurantOS-Bot/1.0 (contact@restaurant.com)',
+        'Accept-Language': 'es',
+      },
+    })
+    if (res.ok) {
+      const data = await res.json()
+      if (data?.display_name) {
+        const road = data.address?.road || data.address?.neighbourhood || data.address?.suburb
+        const houseNumber = data.address?.house_number ? ` #${data.address.house_number}` : ''
+        const city = data.address?.city || data.address?.town || data.address?.municipality || ''
+        const short = road ? `${road}${houseNumber}${city ? `, ${city}` : ''}` : data.display_name.split(',').slice(0, 3).join(',')
+        return { address: `${short} (GPS: ${lat.toFixed(5)}, ${lon.toFixed(5)})`, mapsUrl }
+      }
+    }
+  } catch (err) {
+    console.error('Error en geocodificación inversa:', err)
+  }
+  return { address: `Ubicación GPS (${lat.toFixed(5)}, ${lon.toFixed(5)})`, mapsUrl }
 }
 
 // Envía respuesta por voz sintetizada gratuita cuando el cliente envía audio
@@ -191,7 +218,7 @@ Deno.serve(async (req) => {
       return new Response('OK')
     }
 
-    // Pedir nueva dirección
+    // Pedir nueva dirección o ubicación GPS
     if (data === 'new_address') {
       await supabase.from('telegram_sessions').update({
         step: 'awaiting_address',
@@ -201,7 +228,7 @@ Deno.serve(async (req) => {
       await tg('editMessageText', {
         chat_id: chatId,
         message_id: cb.message.message_id,
-        text: '📍 Por favor escribe tu *nueva dirección de entrega*:',
+        text: '📍 Por favor escribe tu *nueva dirección de entrega* o comparte tu *ubicación GPS / en tiempo real* 📎:',
         parse_mode: 'Markdown',
       })
       return new Response('OK')
@@ -254,7 +281,7 @@ Deno.serve(async (req) => {
               inline_keyboard: [
                 [
                   { text: '✅ Sí, a esa dirección', callback_data: 'use_saved_address' },
-                  { text: '📍 Escribir otra dirección', callback_data: 'new_address' },
+                  { text: '📍 Otra dirección o GPS', callback_data: 'new_address' },
                 ],
                 [{ text: '❌ Cancelar', callback_data: 'cancel' }],
               ],
@@ -272,7 +299,7 @@ Deno.serve(async (req) => {
         await tg('editMessageText', {
           chat_id: chatId,
           message_id: cb.message.message_id,
-          text: `🛵 Elegiste *A Domicilio*.\n\nPor favor escribe tu *dirección de entrega*:`,
+          text: `🛵 Elegiste *A Domicilio*.\n\nPor favor escribe tu *dirección de entrega* o comparte tu *ubicación en tiempo real* 📍 tocando el icono de clip 📎:`,
           parse_mode: 'Markdown',
         })
         return new Response('OK')
@@ -389,7 +416,7 @@ Deno.serve(async (req) => {
     return new Response('OK')
   }
 
-  // 2. MANEJO DE MENSAJES ENTRANTES (Texto o Audio de voz)
+  // 2. MANEJO DE MENSAJES ENTRANTES (Ubicación GPS, Nota de Voz o Texto)
   const msg = update.message
   if (!msg) return new Response('OK')
 
@@ -402,7 +429,72 @@ Deno.serve(async (req) => {
   const isStaff = !!staff
 
   // ========================================================
-  // CASO A: NOTA DE VOZ (Audio)
+  // CASO A: UBICACIÓN GPS / TIEMPO REAL
+  // ========================================================
+  if (msg.location) {
+    const lat = msg.location.latitude
+    const lon = msg.location.longitude
+    await tg('sendChatAction', { chat_id: chatId, action: 'find_location' })
+
+    const { address, mapsUrl } = await reverseGeocode(lat, lon)
+
+    // Consultar sesión activa
+    const { data: session } = await supabase
+      .from('telegram_sessions')
+      .select('*')
+      .eq('chat_id', chatId)
+      .maybeSingle()
+
+    if (session && session.draft_order) {
+      const draft = session.draft_order
+      draft.deliveryType = 'domicilio'
+      draft.address = address
+
+      await supabase.from('telegram_sessions').update({
+        step: 'awaiting_confirmation',
+        draft_order: draft,
+        updated_at: new Date().toISOString(),
+      }).eq('chat_id', chatId)
+
+      // Guardar en customers
+      await supabase
+        .from('customers')
+        .update({ address })
+        .eq('telegram_chat_id', chatId)
+
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: `📍 *¡Ubicación GPS recibida!*\n\n${address}\n🗺 [Ver en Google Maps](${mapsUrl})\n\nContinuando con la confirmación de tu pedido:`,
+        parse_mode: 'Markdown',
+      })
+
+      await showFinalSummary(chatId, null, draft, false)
+      return new Response('OK')
+    } else {
+      // Si comparte ubicación sin pedido activo, la guardamos como habitual
+      await supabase
+        .from('customers')
+        .upsert(
+          {
+            telegram_chat_id: chatId,
+            address,
+            full_name: customerName,
+            telegram_username: username,
+          },
+          { onConflict: 'telegram_chat_id' },
+        )
+
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: `📍 *¡Ubicación guardada como tu dirección de entrega habitual!*\n\n${address}\n\nAhora puedes enviarnos lo que deseas ordenar en texto o con nota de voz 🎙.`,
+        parse_mode: 'Markdown',
+      })
+      return new Response('OK')
+    }
+  }
+
+  // ========================================================
+  // CASO B: NOTA DE VOZ (Audio)
   // ========================================================
   if (msg.voice) {
     await tg('sendChatAction', { chat_id: chatId, action: 'typing' })
@@ -435,7 +527,7 @@ Deno.serve(async (req) => {
   }
 
   // ========================================================
-  // CASO B: MENSAJE DE TEXTO
+  // CASO C: MENSAJE DE TEXTO
   // ========================================================
   if (!msg.text) return new Response('OK')
   const text = msg.text.trim()
@@ -483,7 +575,7 @@ Deno.serve(async (req) => {
     return new Response('OK')
   }
 
-  // Si estábamos esperando la dirección
+  // Si estábamos esperando la dirección en texto
   const { data: session } = await supabase
     .from('telegram_sessions')
     .select('*')
@@ -720,12 +812,12 @@ async function handleReorderLast(chatId: number, editMessageId: number | null, f
 
   // Preguntar dirección si es domicilio y ya tenía dirección previa
   if (draft.deliveryType === 'domicilio' && cust.address) {
-    const textMsg = `🍔 *REPETIR TU PEDIDO*\n\n${draft.detalleTxt}\n💰 *Total:* *${money(draft.subtotal)}*\n\n🛵 ¿Deseas que te lo enviemos a tu dirección habitual:\n📍 *${cust.address}*?\n\n¿O prefieres una dirección diferente?`
+    const textMsg = `🍔 *REPETIR TU PEDIDO*\n\n${draft.detalleTxt}\n💰 *Total:* *${money(draft.subtotal)}*\n\n🛵 ¿Deseas que te lo enviemos a tu dirección habitual:\n📍 *${cust.address}*?\n\n¿O prefieres una dirección diferente o GPS?`
     const replyMarkup = {
       inline_keyboard: [
         [
           { text: '✅ Sí, a esa dirección', callback_data: 'use_saved_address' },
-          { text: '📍 Escribir otra dirección', callback_data: 'new_address' },
+          { text: '📍 Otra dirección / GPS', callback_data: 'new_address' },
         ],
         [{ text: '❌ Cancelar', callback_data: 'cancel' }],
       ],
@@ -855,13 +947,13 @@ async function processParsedItems(
 
       await tg('sendMessage', {
         chat_id: chatId,
-        text: `📝 *RESUMEN PREVIO*\n\n${detalleTxt}\n💰 Subtotal: *${money(subtotal)}*\n\n🛵 ¿Deseas que te lo enviemos a tu dirección habitual:\n📍 *${cust.address}*?\n\n¿O prefieres una dirección diferente?`,
+        text: `📝 *RESUMEN PREVIO*\n\n${detalleTxt}\n💰 Subtotal: *${money(subtotal)}*\n\n🛵 ¿Deseas que te lo enviemos a tu dirección habitual:\n📍 *${cust.address}*?\n\n¿O prefieres una dirección diferente o GPS?`,
         parse_mode: 'Markdown',
         reply_markup: {
           inline_keyboard: [
             [
               { text: '✅ Sí, a esa dirección', callback_data: 'use_saved_address' },
-              { text: '📍 Escribir otra dirección', callback_data: 'new_address' },
+              { text: '📍 Otra dirección / GPS', callback_data: 'new_address' },
             ],
             [{ text: '❌ Cancelar', callback_data: 'cancel' }],
           ],
@@ -880,7 +972,7 @@ async function processParsedItems(
     })
     await tg('sendMessage', {
       chat_id: chatId,
-      text: `📝 *RESUMEN PREVIO*\n\n${detalleTxt}\nSubtotal: *${money(subtotal)}*\n\n🛵 Elegiste *A Domicilio*. Por favor escribe tu *dirección de entrega* para continuar:`,
+      text: `📝 *RESUMEN PREVIO*\n\n${detalleTxt}\nSubtotal: *${money(subtotal)}*\n\n🛵 Elegiste *A Domicilio*. Por favor escribe tu *dirección de entrega* o comparte tu *ubicación en tiempo real* 📍 tocando el clip 📎:`,
       parse_mode: 'Markdown',
     })
     return

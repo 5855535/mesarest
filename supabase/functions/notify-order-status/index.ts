@@ -1,5 +1,5 @@
 // Edge Function: notify-order-status
-// Notifica al cliente por Telegram cuando su pedido sale de cocina
+// Notifica al cliente por Telegram cuando su pedido sale de cocina o va en camino
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.48.1'
 
 const BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') ?? ''
@@ -60,12 +60,15 @@ Deno.serve(async (req) => {
 
   const num = `#${ord.order_number}`
 
-  // Mensaje exacto de que va en camino o listo para recoger
+  // Mensaje detallado indicando la dirección de entrega cuando va en camino
   let mensaje = ''
   if (ord.delivery_type === 'domicilio') {
-    mensaje = `🛵 *¡Tu pedido ${num} ya salió del restaurante y va en camino a tu dirección!*\n\nPor favor ten listo el pago en efectivo. ¡Muchas gracias por tu compra!`
+    const dirTxt = ord.delivery_address
+      ? `\n📍 *A esta dirección se llevará tu pedido:*\n_${ord.delivery_address}_\n`
+      : ''
+    mensaje = `🛵 *¡Tu pedido ${num} ya salió del restaurante y va en camino!*${dirTxt}\nEl domiciliario se dirige hacia allá. Por favor ten listo el pago en efectivo.\n\n¡Muchas gracias por tu compra!`
   } else if (ord.delivery_type === 'recogida') {
-    mensaje = `🛍 *¡Tu pedido ${num} ya está listo en el local para que pases a recogerlo!*\n\n¡Te esperamos!`
+    mensaje = `🛍 *¡Tu pedido ${num} ya está listo en el local para que pases a recogerlo!*\n\n¡Te esperamos en el mostrador!`
   } else {
     mensaje = `🍽 *¡Tu pedido ${num} ya va hacia tu mesa!*\n\n¡Buen provecho!`
   }
