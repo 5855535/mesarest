@@ -45,8 +45,13 @@ REGLAS ESTRICTAS:
 export async function extractWithGemini(
   userText: string,
   catalogContext: string,
+  onUsage?: (metrics: AudioInferenceMetrics) => void,
 ): Promise<GeminiExtraction | null> {
-  if (!GEMINI_API_KEY) return null
+  const tStart = performance.now()
+  if (!GEMINI_API_KEY) {
+    onUsage?.({ inferenceMs: 0, promptTokens: 0, candidatesTokens: 0, success: false, error: 'GEMINI_API_KEY no configurada' })
+    return null
+  }
 
   try {
     const prompt = `CATÁLOGO OFICIAL DISPONIBLE:\n${catalogContext}\n\nMENSAJE DEL CLIENTE:\n"${userText}"`
@@ -65,31 +70,70 @@ export async function extractWithGemini(
       }),
     })
 
+    const inferenceMs = Math.round(performance.now() - tStart)
+
     if (!res.ok) {
-      console.error('Error Gemini API:', await res.text())
+      const errText = await res.text()
+      console.error('Error Gemini API:', errText)
+      onUsage?.({ inferenceMs, promptTokens: 0, candidatesTokens: 0, success: false, error: `HTTP ${res.status}: ${errText.slice(0, 100)}` })
       return null
     }
 
     const data = await res.json()
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text
-    if (!raw) return null
+    const promptTokens = data.usageMetadata?.promptTokenCount ?? 0
+    const candidatesTokens = data.usageMetadata?.candidatesTokenCount ?? 0
 
-    return JSON.parse(raw) as GeminiExtraction
-  } catch (err) {
+    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text
+    if (!raw) {
+      onUsage?.({ inferenceMs, promptTokens, candidatesTokens, success: false, error: 'Respuesta vacía' })
+      return null
+    }
+
+    const extraction = JSON.parse(raw) as GeminiExtraction
+    onUsage?.({ inferenceMs, promptTokens, candidatesTokens, success: true })
+    return extraction
+  } catch (err: any) {
+    const inferenceMs = Math.round(performance.now() - tStart)
     console.error('Fallo en extractWithGemini:', err)
+    onUsage?.({ inferenceMs, promptTokens: 0, candidatesTokens: 0, success: false, error: err?.message || 'Excepción' })
     return null
   }
 }
 
+export interface AudioInferenceMetrics {
+  inferenceMs: number
+  promptTokens: number
+  candidatesTokens: number
+  success: boolean
+  error?: string
+}
+
+export interface AudioExtractionResult {
+  extraction: GeminiExtraction | null
+  metrics: AudioInferenceMetrics
+}
+
 /**
- * Transcribe y extrae el pedido de una nota de voz (audio OGG/Opus de Telegram).
+ * Transcribe y extrae el pedido de una nota de voz (audio OGG/Opus de Telegram),
+ * midiendo latencia exacta, tokens consumidos y diagnóstico de respuesta.
  */
 export async function extractAudioWithGemini(
   audioBase64: string,
   mimeType: string,
   catalogContext: string,
-): Promise<GeminiExtraction | null> {
-  if (!GEMINI_API_KEY) return null
+): Promise<AudioExtractionResult> {
+  const tStart = performance.now()
+  const baseMetrics: AudioInferenceMetrics = {
+    inferenceMs: 0,
+    promptTokens: 0,
+    candidatesTokens: 0,
+    success: false,
+  }
+
+  if (!GEMINI_API_KEY) {
+    baseMetrics.error = 'GEMINI_API_KEY no configurada'
+    return { extraction: null, metrics: baseMetrics }
+  }
 
   try {
     const prompt = `CATÁLOGO OFICIAL DISPONIBLE:\n${catalogContext}\n\nEscucha este audio de un cliente de restaurante y extrae su pedido siguiendo las reglas.`
@@ -119,18 +163,33 @@ export async function extractAudioWithGemini(
       }),
     })
 
+    const inferenceMs = Math.round(performance.now() - tStart)
+    baseMetrics.inferenceMs = inferenceMs
+
     if (!res.ok) {
-      console.error('Error Gemini Audio:', await res.text())
-      return null
+      const errText = await res.text()
+      console.error(`[GEMINI_AUDIO_ERROR] Status ${res.status}:`, errText)
+      baseMetrics.error = `HTTP ${res.status}: ${errText.slice(0, 200)}`
+      return { extraction: null, metrics: baseMetrics }
     }
 
     const data = await res.json()
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text
-    if (!raw) return null
+    baseMetrics.promptTokens = data.usageMetadata?.promptTokenCount ?? 0
+    baseMetrics.candidatesTokens = data.usageMetadata?.candidatesTokenCount ?? 0
 
-    return JSON.parse(raw) as GeminiExtraction
-  } catch (err) {
-    console.error('Fallo en extractAudioWithGemini:', err)
-    return null
+    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text
+    if (!raw) {
+      baseMetrics.error = 'Respuesta vacía de Gemini'
+      return { extraction: null, metrics: baseMetrics }
+    }
+
+    const extraction = JSON.parse(raw) as GeminiExtraction
+    baseMetrics.success = true
+    return { extraction, metrics: baseMetrics }
+  } catch (err: any) {
+    baseMetrics.inferenceMs = Math.round(performance.now() - tStart)
+    baseMetrics.error = err?.message || 'Error desconocido'
+    console.error('[GEMINI_AUDIO_EXCEPTION]:', err)
+    return { extraction: null, metrics: baseMetrics }
   }
 }

@@ -24,7 +24,8 @@ async function sendTelegram(chatId: number, text: string) {
 
 Deno.serve(async (req) => {
   const authHeader = req.headers.get('Authorization')
-  if (!authHeader) return new Response('Unauthorized', { status: 401 })
+  const apiKey = req.headers.get('apikey')
+  if (!authHeader && !apiKey) return new Response('Unauthorized', { status: 401 })
 
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 })
 
@@ -35,7 +36,7 @@ Deno.serve(async (req) => {
     return new Response('Bad JSON', { status: 400 })
   }
 
-  const { order_id } = body
+  const { order_id, new_status, delivery_type } = body
   if (!order_id) {
     return new Response('Missing order_id', { status: 400 })
   }
@@ -43,7 +44,7 @@ Deno.serve(async (req) => {
   // Consultar pedido y cliente asociado
   const { data: ord, error } = await supabase
     .from('orders')
-    .select('order_number, delivery_type, delivery_address, total, customer:customers(telegram_chat_id, full_name)')
+    .select('order_number, status, delivery_type, delivery_address, total, table_label, customer:customers(telegram_chat_id, full_name)')
     .eq('id', order_id)
     .single()
 
@@ -59,18 +60,26 @@ Deno.serve(async (req) => {
   }
 
   const num = `#${ord.order_number}`
+  const effectiveStatus = new_status || ord.status
+  const effectiveType = delivery_type || ord.delivery_type
 
-  // Mensaje detallado indicando la dirección de entrega cuando va en camino
+  // Mensaje detallado según el tipo de entrega y el estado exacto
   let mensaje = ''
-  if (ord.delivery_type === 'domicilio') {
+  if (effectiveType === 'domicilio' && effectiveStatus === 'recogido') {
     const dirTxt = ord.delivery_address
       ? `\n📍 *A esta dirección se llevará tu pedido:*\n_${ord.delivery_address}_\n`
       : ''
     mensaje = `🛵 *¡Tu pedido ${num} ya salió del restaurante y va en camino!*${dirTxt}\nEl domiciliario se dirige hacia allá. Por favor ten listo el pago en efectivo.\n\n¡Muchas gracias por tu compra!`
-  } else if (ord.delivery_type === 'recogida') {
+  } else if (effectiveType === 'recogida' && effectiveStatus === 'listo') {
     mensaje = `🛍 *¡Tu pedido ${num} ya está listo en el local para que pases a recogerlo!*\n\n¡Te esperamos en el mostrador!`
+  } else if (effectiveType === 'mesa' && effectiveStatus === 'listo') {
+    const mesaTxt = ord.table_label ? ` a la Mesa ${ord.table_label}` : ''
+    mensaje = `🍽 *¡Tu pedido ${num} ya está listo y va hacia tu mesa${mesaTxt}!*\n\n¡Buen provecho!`
   } else {
-    mensaje = `🍽 *¡Tu pedido ${num} ya va hacia tu mesa!*\n\n¡Buen provecho!`
+    // Si la orden pasa a un estado que no requiere notificación al cliente
+    return new Response(JSON.stringify({ ok: true, notified: false, reason: 'Status does not require notification' }), {
+      headers: { 'Content-Type': 'application/json' },
+    })
   }
 
   await sendTelegram(chat, mensaje)

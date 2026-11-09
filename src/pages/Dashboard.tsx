@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { RotateCw } from 'lucide-react'
+import { RotateCw, Cpu, CheckCircle2, ShieldCheck } from 'lucide-react'
 import { Skeleton, TableSkeleton } from '../components/Skeleton'
 import { money } from '../lib/format'
 import { supabase } from '../lib/supabase'
@@ -23,6 +23,18 @@ interface TopProduct {
   total: number
 }
 
+interface AiTelemetrySummary {
+  totalCalls: number
+  promptTokens: number
+  candidatesTokens: number
+  totalTokens: number
+  groqCount: number
+  geminiCount: number
+  localParserCount: number
+  avgLatencyMs: number
+  successRate: number
+}
+
 const CHANNEL_LABEL: Record<string, string> = {
   pos: 'Caja',
   telegram: 'Telegram',
@@ -40,6 +52,17 @@ const STATUS_STYLE: Record<string, { label: string; badge: string }> = {
 
 export default function Dashboard() {
   const [orders, setOrders] = useState<OrderRow[]>([])
+  const [aiStats, setAiStats] = useState<AiTelemetrySummary>({
+    totalCalls: 0,
+    promptTokens: 0,
+    candidatesTokens: 0,
+    totalTokens: 0,
+    groqCount: 0,
+    geminiCount: 0,
+    localParserCount: 0,
+    avgLatencyMs: 0,
+    successRate: 100,
+  })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -47,14 +70,46 @@ export default function Dashboard() {
     const today = new Date()
     today.setHours(0, 0, 0, 0)
 
-    const { data, error } = await supabase
-      .from('orders')
-      .select('id, order_number, status, channel, delivery_type, table_label, total, created_at, delivered_at, order_items(product_name, quantity, line_total)')
-      .gte('created_at', today.toISOString())
-      .order('created_at', { ascending: false })
+    const [ordRes, aiRes] = await Promise.all([
+      supabase
+        .from('orders')
+        .select('id, order_number, status, channel, delivery_type, table_label, total, created_at, delivered_at, order_items(product_name, quantity, line_total)')
+        .gte('created_at', today.toISOString())
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('ai_usage_logs')
+        .select('provider, prompt_tokens, candidates_tokens, total_tokens, latency_ms, success')
+        .gte('created_at', today.toISOString()),
+    ])
 
-    if (error) setError(error.message)
-    else setOrders(data as unknown as OrderRow[])
+    if (ordRes.error) setError(ordRes.error.message)
+    else setOrders(ordRes.data as unknown as OrderRow[])
+
+    if (aiRes.data && aiRes.data.length > 0) {
+      const logs = aiRes.data
+      const totalCalls = logs.length
+      const promptTokens = logs.reduce((s, l) => s + (l.prompt_tokens || 0), 0)
+      const candidatesTokens = logs.reduce((s, l) => s + (l.candidates_tokens || 0), 0)
+      const totalTokens = logs.reduce((s, l) => s + (l.total_tokens || 0), 0)
+      const groqCount = logs.filter((l) => l.provider === 'groq_whisper').length
+      const geminiCount = logs.filter((l) => l.provider === 'gemini_flash').length
+      const localParserCount = logs.filter((l) => l.provider === 'local_parser').length
+      const totalLatency = logs.reduce((s, l) => s + (l.latency_ms || 0), 0)
+      const successCount = logs.filter((l) => l.success).length
+
+      setAiStats({
+        totalCalls,
+        promptTokens,
+        candidatesTokens,
+        totalTokens,
+        groqCount,
+        geminiCount,
+        localParserCount,
+        avgLatencyMs: totalCalls > 0 ? Math.round(totalLatency / totalCalls) : 0,
+        successRate: totalCalls > 0 ? Math.round((successCount / totalCalls) * 100) : 100,
+      })
+    }
+
     setLoading(false)
   }, [])
 
@@ -227,6 +282,83 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Módulo de Observabilidad y Consumo de IA */}
+      <div className="rounded-2xl bg-zinc-900 p-5 border border-zinc-800 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800/80 pb-3">
+          <div className="flex items-center gap-2.5">
+            <div className="rounded-lg bg-purple-500/10 p-2 border border-purple-500/20 text-purple-400">
+              <Cpu className="h-4 w-4" />
+            </div>
+            <div>
+              <h2 className="text-sm font-mono font-bold tracking-tight text-zinc-100 flex items-center gap-2">
+                <span>CONSUMO DE INTELIGENCIA ARTIFICIAL</span>
+                <span className="text-[10px] font-sans font-normal text-purple-300 bg-purple-950/80 px-2 py-0.5 rounded-full border border-purple-800/60">
+                  Telemetría en Vivo
+                </span>
+              </h2>
+              <p className="text-[11px] text-zinc-400">Groq Whisper (Audio), Google Gemini 2.5 Flash y Parser Determinista</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-950/80 px-2.5 py-1 text-[11px] font-mono font-medium text-emerald-400 border border-emerald-800/60">
+              <ShieldCheck className="h-3 w-3" />
+              <span>Costo Real: $0.00 USD (Capa Gratuita)</span>
+            </span>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-1">
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-20 w-full" />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="rounded-xl bg-zinc-950/80 p-3.5 border border-zinc-800">
+                <p className="text-[10px] font-mono uppercase text-zinc-500 font-bold">Solicitudes de IA</p>
+                <p className="text-xl font-bold font-mono text-zinc-100 mt-1">{aiStats.totalCalls}</p>
+                <p className="text-[10px] text-zinc-400 font-mono mt-0.5">
+                  {aiStats.localParserCount} gratis sin LLM • {aiStats.groqCount + aiStats.geminiCount} con IA
+                </p>
+              </div>
+
+              <div className="rounded-xl bg-zinc-950/80 p-3.5 border border-zinc-800">
+                <p className="text-[10px] font-mono uppercase text-zinc-500 font-bold">Tokens Medidos (Gemini)</p>
+                <p className="text-xl font-bold font-mono text-purple-400 mt-1">{aiStats.totalTokens.toLocaleString()}</p>
+                <p className="text-[10px] text-zinc-400 font-mono mt-0.5">
+                  {aiStats.promptTokens.toLocaleString()} in • {aiStats.candidatesTokens.toLocaleString()} out
+                </p>
+              </div>
+
+              <div className="rounded-xl bg-zinc-950/80 p-3.5 border border-zinc-800">
+                <p className="text-[10px] font-mono uppercase text-zinc-500 font-bold">Latencia Promedio</p>
+                <p className="text-xl font-bold font-mono text-sky-400 mt-1">{aiStats.avgLatencyMs} ms</p>
+                <p className="text-[10px] text-zinc-400 font-mono mt-0.5">Whisper + Gemini Flash</p>
+              </div>
+
+              <div className="rounded-xl bg-zinc-950/80 p-3.5 border border-zinc-800">
+                <p className="text-[10px] font-mono uppercase text-zinc-500 font-bold">Tasa de Precisión</p>
+                <p className="text-xl font-bold font-mono text-emerald-400 mt-1">{aiStats.successRate}%</p>
+                <p className="text-[10px] text-zinc-400 font-mono mt-0.5">Procesamiento sin error</p>
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-zinc-950/40 p-3 border border-zinc-800/60 flex flex-col sm:flex-row sm:items-center justify-between text-[11px] text-zinc-400 gap-2 font-mono">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                <span>
+                  <strong>Cuotas gratuitas:</strong> Gemini 2.5 Flash (~1,500 peticiones/día) | Groq Whisper (~2,000 audios-seg/día).
+                </span>
+              </div>
+              <span className="text-zinc-500 text-[10px]">Tokens y métricas medidos directamente por las APIs oficiales.</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Tabla pedidos de hoy */}

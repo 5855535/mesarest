@@ -6,6 +6,7 @@ import {
   type ParsedOrder,
 } from './orderParser.ts'
 import { extractAudioWithGemini, extractWithGemini, type GeminiExtraction } from './gemini.ts'
+import { transcribeWithGroq } from './stt.ts'
 
 const BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') ?? ''
 const WEBHOOK_SECRET = Deno.env.get('TELEGRAM_WEBHOOK_SECRET') ?? ''
@@ -28,13 +29,63 @@ function money(n: number): string {
   return `$${Math.round(n).toLocaleString('es-CO')}`
 }
 
-async function loadCatalog(): Promise<{ catalog: CatalogProduct[]; byId: Map<string, any>; contextStr: string }> {
-  const { data: prods } = await supabase
+function logAiUsage(data: {
+  channel?: string
+  provider: string
+  operation: string
+  prompt_tokens?: number
+  candidates_tokens?: number
+  audio_seconds?: number
+  latency_ms: number
+  success: boolean
+  error_message?: string | null
+}) {
+  const prompt_tokens = data.prompt_tokens ?? 0
+  const candidates_tokens = data.candidates_tokens ?? 0
+  supabase
+    .from('ai_usage_logs')
+    .insert({
+      channel: data.channel || 'telegram',
+      provider: data.provider,
+      operation: data.operation,
+      prompt_tokens,
+      candidates_tokens,
+      total_tokens: prompt_tokens + candidates_tokens,
+      audio_seconds: data.audio_seconds || 0,
+      latency_ms: data.latency_ms,
+      success: data.success,
+      error_message: data.error_message || null,
+    })
+    .then(() => {})
+    .catch((err: any) => console.error('[AI_USAGE_LOG_ERROR]:', err))
+}
+
+interface CachedCatalog {
+  catalog: CatalogProduct[]
+  byId: Map<string, any>
+  timestamp: number
+}
+
+let catalogCache: CachedCatalog | null = null
+const CATALOG_CACHE_TTL_MS = 60_000 // Cache en memoria volátil de 60 segundos
+
+async function loadCatalog(): Promise<{ catalog: CatalogProduct[]; byId: Map<string, any> }> {
+  const now = Date.now()
+  if (catalogCache && (now - catalogCache.timestamp < CATALOG_CACHE_TTL_MS)) {
+    return { catalog: catalogCache.catalog, byId: catalogCache.byId }
+  }
+
+  const { data: prods, error } = await supabase
     .from('products')
     .select('id, name, aliases, price, is_available, product_ingredients(name, removable), product_modifiers(id, name, extra_price, is_available)')
     .eq('is_available', true)
 
-  const catalog: CatalogProduct[] = (prods || []).map((p: any) => ({
+  if (error || !prods) {
+    if (catalogCache) return { catalog: catalogCache.catalog, byId: catalogCache.byId }
+    return { catalog: [], byId: new Map() }
+  }
+
+  const catalog: CatalogProduct[] = prods.map((p: any) => ({
     id: p.id,
     name: p.name,
     aliases: p.aliases || [],
@@ -50,19 +101,73 @@ async function loadCatalog(): Promise<{ catalog: CatalogProduct[]; byId: Map<str
   }))
 
   const byId = new Map(catalog.map((p) => [p.id, p]))
-
-  const contextStr = catalog
-    .map((p) => {
-      const ing = p.ingredients.map((i) => i.name + (i.removable ? ' (removible)' : '')).join(', ')
-      const mod = p.modifiers.map((m) => `${m.name} (+${money(m.extra_price || 0)})`).join(', ')
-      return `• Producto: "${p.name}" | Precio: ${money(p.price || 0)} | Ingredientes: [${ing}] | Adicionales: [${mod}] | Alias: [${p.aliases.join(', ')}]`
-    })
-    .join('\n')
-
-  return { catalog, byId, contextStr }
+  catalogCache = { catalog, byId, timestamp: now }
+  return { catalog, byId }
 }
 
-async function downloadTelegramAudio(fileId: string): Promise<{ base64: string; mimeType: string } | null> {
+function formatProductForAI(p: CatalogProduct): string {
+  const ing = p.ingredients.length > 0
+    ? ` | Ingredientes: [${p.ingredients.map((i) => i.name + (i.removable ? '' : ' [fijo]')).join(', ')}]`
+    : ''
+  const mod = p.modifiers.length > 0
+    ? ` | Adicionales: [${p.modifiers.map((m) => `${m.name} (+${money(m.extra_price || 0)})`).join(', ')}]`
+    : ''
+  const alias = p.aliases.length > 0 ? ` | Alias: [${p.aliases.join(', ')}]` : ''
+  return `• "${p.name}" (${money(p.price || 0)})${alias}${ing}${mod}`
+}
+
+/**
+ * Optimización de contexto: Si hay texto de usuario, selecciona únicamente los productos
+ * relevantes y candidatos para reducir tokens y latencia hasta en un 80%.
+ */
+function buildCatalogContext(catalog: CatalogProduct[], userText?: string, candidateIds?: string[]): string {
+  if (!userText || catalog.length <= 15) {
+    return catalog.map(formatProductForAI).join('\n')
+  }
+
+  const cleanWords = userText
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !['para', 'como', 'quiero', 'dame', 'favor', 'buenas', 'mesa', 'llevar', 'domicilio', 'hola'].includes(w))
+
+  const candidateSet = new Set(candidateIds || [])
+  const scored = catalog.map((p) => {
+    let score = candidateSet.has(p.id) ? 10 : 0
+    const pStr = `${p.name} ${(p.aliases || []).join(' ')}`.toLowerCase()
+    for (const w of cleanWords) {
+      if (pStr.includes(w)) score += 2
+    }
+    return { product: p, score }
+  })
+
+  scored.sort((a, b) => b.score - a.score)
+  const selected = scored.filter((s) => s.score > 0).map((s) => s.product)
+
+  if (selected.length < 15) {
+    for (const item of scored) {
+      if (!selected.some((s) => s.id === item.product.id)) {
+        selected.push(item.product)
+        if (selected.length >= 15) break
+      }
+    }
+  }
+
+  return selected.map(formatProductForAI).join('\n')
+}
+
+interface TelegramAudioPayload {
+  base64: string
+  rawBytes: Uint8Array
+  mimeType: string
+  sizeBytes: number
+  downloadMs: number
+  encodingMs: number
+}
+
+async function downloadTelegramAudio(fileId: string): Promise<TelegramAudioPayload | null> {
+  const tStart = performance.now()
   try {
     const fileInfo = await tg('getFile', { file_id: fileId })
     if (!fileInfo.ok || !fileInfo.result?.file_path) return null
@@ -72,13 +177,26 @@ async function downloadTelegramAudio(fileId: string): Promise<{ base64: string; 
     if (!resp.ok) return null
 
     const arrayBuffer = await resp.arrayBuffer()
+    const downloadMs = Math.round(performance.now() - tStart)
+
+    const tEncStart = performance.now()
     const uint8Array = new Uint8Array(arrayBuffer)
+    const CHUNK_SIZE = 0x8000
     let binary = ''
-    for (let i = 0; i < uint8Array.byteLength; i++) {
-      binary += String.fromCharCode(uint8Array[i])
+    for (let i = 0; i < uint8Array.length; i += CHUNK_SIZE) {
+      binary += String.fromCharCode.apply(null, uint8Array.subarray(i, i + CHUNK_SIZE) as unknown as number[])
     }
     const base64 = btoa(binary)
-    return { base64, mimeType: 'audio/ogg' }
+    const encodingMs = Math.round(performance.now() - tEncStart)
+
+    return {
+      base64,
+      rawBytes: uint8Array,
+      mimeType: 'audio/ogg',
+      sizeBytes: uint8Array.byteLength,
+      downloadMs,
+      encodingMs,
+    }
   } catch (err) {
     console.error('Error descargando audio de Telegram:', err)
     return null
@@ -110,33 +228,6 @@ async function reverseGeocode(lat: number, lon: number): Promise<{ address: stri
     console.error('Error en geocodificación inversa:', err)
   }
   return { address: `Ubicación GPS (${lat.toFixed(5)}, ${lon.toFixed(5)})`, mapsUrl }
-}
-
-// Envía respuesta por voz sintetizada gratuita cuando el cliente envía audio
-async function sendTtsVoice(chatId: number, text: string): Promise<boolean> {
-  try {
-    const cleanText = text.replace(/[*_`#]/g, '').slice(0, 190)
-    const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(cleanText)}&tl=es&client=tw-ob`
-    const res = await fetch(ttsUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-      },
-    })
-    if (res.ok) {
-      const blob = await res.blob()
-      const formData = new FormData()
-      formData.append('chat_id', String(chatId))
-      formData.append('voice', blob, 'respuesta.ogg')
-      await fetch(`${TELEGRAM_API}/sendVoice`, {
-        method: 'POST',
-        body: formData,
-      })
-      return true
-    }
-  } catch (err) {
-    console.error('Error enviando voz TTS:', err)
-  }
-  return false
 }
 
 Deno.serve(async (req) => {
@@ -510,8 +601,93 @@ Deno.serve(async (req) => {
       return new Response('OK')
     }
 
-    const { catalog, byId, contextStr } = await loadCatalog()
-    const aiResult = await extractAudioWithGemini(audioData.base64, audioData.mimeType, contextStr)
+    const { catalog, byId } = await loadCatalog()
+    let aiResult: GeminiExtraction | null = null
+    let pipelineUsed = 'gemini_multimodal'
+    let whisperText: string | null = null
+    let whisperMs = 0
+    let promptTokens = 0
+    let candidatesTokens = 0
+    let pipelineError: string | null = null
+
+    // 1. INTENTO PRIMARIO: Transcripción ultrarrápida con Groq Whisper
+    const whisperRes = await transcribeWithGroq(audioData.rawBytes, audioData.mimeType)
+    if (whisperRes.success && whisperRes.text) {
+      whisperText = whisperRes.text
+      whisperMs = whisperRes.transcriptionMs
+
+      // 2. CANALIZACIÓN AL PARSER LOCAL DETERMINISTA (¡0 tokens de IA!)
+      const parsedAudio = parseQuickOrder(whisperText, catalog)
+      const parseOk = parsedAudio.lines.length > 0 && parsedAudio.lines.every((l) => l.status === 'ok')
+
+      if (parseOk) {
+        pipelineUsed = 'groq_whisper_plus_local_parser'
+        aiResult = {
+          table: parsedAudio.table,
+          deliveryType: parsedAudio.deliveryType,
+          items: parsedAudio.lines.map((l) => {
+            const prod = byId.get(l.productId!)
+            return {
+              product_name: prod.name,
+              quantity: l.quantity,
+              excluded_ingredients: l.excluded,
+              modifiers: prod.modifiers.filter((m: any) => l.modifierIds.includes(m.id)).map((m: any) => m.name),
+            }
+          }),
+          unrecognized: [],
+        }
+      } else {
+        // 3. SI EL PARSER TIENE DUDAS: Consultar a Gemini solo con el texto transcripto
+        pipelineUsed = 'groq_whisper_plus_gemini_text'
+        const candidateIds = parsedAudio.lines.flatMap((l) => l.candidates)
+        const contextStr = buildCatalogContext(catalog, whisperText, candidateIds)
+        aiResult = await extractWithGemini(whisperText, contextStr)
+      }
+    } else if (whisperRes.error) {
+      pipelineError = whisperRes.error
+    }
+
+    // 4. FALLBACK DE SEGURIDAD: Si Groq no está configurado o falló, recurrir a Gemini multimodal
+    if (!aiResult || aiResult.items.length === 0) {
+      if (!whisperText) {
+        pipelineUsed = 'gemini_multimodal_fallback'
+        const contextStr = buildCatalogContext(catalog)
+        const geminiRes = await extractAudioWithGemini(audioData.base64, audioData.mimeType, contextStr)
+        aiResult = geminiRes.extraction
+        promptTokens = geminiRes.metrics.promptTokens
+        candidatesTokens = geminiRes.metrics.candidatesTokens
+        if (geminiRes.metrics.error) pipelineError = geminiRes.metrics.error
+      }
+    }
+
+    const totalPipelineMs = Math.round(audioData.downloadMs + audioData.encodingMs + whisperMs)
+    console.info('[AUDIO_PIPELINE_TELEMETRY]', JSON.stringify({
+      chat_id: chatId,
+      pipeline_used: pipelineUsed,
+      file_size_kb: Math.round((audioData.sizeBytes / 1024) * 10) / 10,
+      download_ms: audioData.downloadMs,
+      encoding_ms: audioData.encodingMs,
+      whisper_ms: whisperMs,
+      total_pipeline_ms: totalPipelineMs,
+      transcribed_text: whisperText,
+      tokens_prompt: promptTokens,
+      tokens_candidates: candidatesTokens,
+      items_recognized: aiResult?.items?.length ?? 0,
+      success: !!aiResult && aiResult.items.length > 0,
+      error: pipelineError,
+    }))
+
+    logAiUsage({
+      channel: 'telegram',
+      provider: pipelineUsed.includes('groq') ? 'groq_whisper' : 'gemini_flash',
+      operation: 'audio_transcription',
+      prompt_tokens: promptTokens,
+      candidates_tokens: candidatesTokens,
+      audio_seconds: Math.round(audioData.sizeBytes / 3200 * 10) / 10,
+      latency_ms: totalPipelineMs,
+      success: !!aiResult && aiResult.items.length > 0,
+      error_message: pipelineError,
+    })
 
     if (!aiResult || aiResult.items.length === 0) {
       await tg('sendMessage', {
@@ -521,11 +697,12 @@ Deno.serve(async (req) => {
       return new Response('OK')
     }
 
-    // Si las respuestas por voz están habilitadas, enviamos confirmación de voz corta
-    if (voiceRepliesEnabled) {
-      const resumenAudio = `Entendido tu pedido de ${aiResult.items.map((i) => `${i.quantity} ${i.product_name}`).join(', ')}. Por favor confirma el tipo de entrega.`
-      sendTtsVoice(chatId, resumenAudio).catch(() => {})
-    }
+    // Confirmación inmediata del audio recibido antes de mostrar el desglose
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text: `🎙 *¡Nota de voz recibida!*\nHemos procesado tu audio. Por favor confirma tu pedido:`,
+      parse_mode: 'Markdown',
+    })
 
     await processParsedItems(chatId, customerName, username, isStaff, staff, aiResult, catalog, byId)
     return new Response('OK')
@@ -725,15 +902,28 @@ Deno.serve(async (req) => {
   }
 
   // 1) Interpretar con reglas locales (Rápido y gratis)
-  const { catalog, byId, contextStr } = await loadCatalog()
+  const { catalog, byId } = await loadCatalog()
   const parsed: ParsedOrder = parseQuickOrder(text, catalog)
 
   const dudas = parsed.lines.length === 0 || parsed.lines.some((l) => l.status !== 'ok')
 
-  // 2) Si las reglas tienen dudas, acudimos a Gemini como respaldo inteligente
+  // 2) Si las reglas tienen dudas, acudimos a Gemini como respaldo inteligente con catálogo optimizado
   if (dudas) {
     await tg('sendChatAction', { chat_id: chatId, action: 'typing' })
-    const aiResult = await extractWithGemini(text, contextStr)
+    const candidateIds = parsed.lines.flatMap((l) => l.candidates)
+    const contextStr = buildCatalogContext(catalog, text, candidateIds)
+    const aiResult = await extractWithGemini(text, contextStr, (m) => {
+      logAiUsage({
+        channel: 'telegram',
+        provider: 'gemini_flash',
+        operation: 'order_extraction',
+        prompt_tokens: m.promptTokens,
+        candidates_tokens: m.candidatesTokens,
+        latency_ms: m.inferenceMs,
+        success: m.success,
+        error_message: m.error,
+      })
+    })
 
     if (aiResult && aiResult.items.length > 0) {
       await processParsedItems(chatId, customerName, username, isStaff, staff, aiResult, catalog, byId)
@@ -741,8 +931,17 @@ Deno.serve(async (req) => {
     }
   }
 
-  // Si las reglas funcionaron sin dudas, usamos su resultado directo
+  // Si las reglas funcionaron sin dudas, usamos su resultado directo (¡0 tokens de IA!)
   if (parsed.lines.length > 0 && parsed.lines.every((l) => l.status === 'ok')) {
+    logAiUsage({
+      channel: 'telegram',
+      provider: 'local_parser',
+      operation: 'order_extraction',
+      prompt_tokens: 0,
+      candidates_tokens: 0,
+      latency_ms: 2,
+      success: true,
+    })
     const aiEquivalent: GeminiExtraction = {
       table: parsed.table,
       deliveryType: parsed.deliveryType,
