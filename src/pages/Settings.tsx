@@ -14,6 +14,10 @@ import {
   Trash2,
   Loader2,
   Plus,
+  Wallet,
+  ShieldCheck,
+  Key,
+  Sparkles,
 } from 'lucide-react'
 import { Skeleton } from '../components/Skeleton'
 import { supabase } from '../lib/supabase'
@@ -27,6 +31,12 @@ interface BusinessSettings {
   voice_replies_enabled: boolean
   memory_reorder_enabled: boolean
   menu_images: string[]
+  bre_b_enabled: boolean
+  bre_b_key: string | null
+  bre_b_holder_name: string | null
+  bre_b_bank_name: string | null
+  elevenlabs_api_key: string | null
+  elevenlabs_voice_id: string | null
 }
 
 interface ProfileInfo {
@@ -79,6 +89,12 @@ export default function Settings() {
         voice_replies_enabled: s.data.voice_replies_enabled ?? true,
         memory_reorder_enabled: s.data.memory_reorder_enabled ?? true,
         menu_images: images,
+        bre_b_enabled: s.data.bre_b_enabled ?? false,
+        bre_b_key: s.data.bre_b_key || '',
+        bre_b_holder_name: s.data.bre_b_holder_name || '',
+        bre_b_bank_name: s.data.bre_b_bank_name || 'Bre-B / Nequi / Bancolombia',
+        elevenlabs_api_key: s.data.elevenlabs_api_key || '',
+        elevenlabs_voice_id: s.data.elevenlabs_voice_id || 'pNInz6obpgDQGcFmaJgB',
       })
     }
 
@@ -212,6 +228,12 @@ export default function Settings() {
         memory_reorder_enabled: settings.memory_reorder_enabled,
         menu_images: settings.menu_images,
         menu_image_url: settings.menu_images[0] || null,
+        bre_b_enabled: settings.bre_b_enabled,
+        bre_b_key: settings.bre_b_key || null,
+        bre_b_holder_name: settings.bre_b_holder_name || null,
+        bre_b_bank_name: settings.bre_b_bank_name || 'Bre-B / Nequi / Bancolombia',
+        elevenlabs_api_key: settings.elevenlabs_api_key || null,
+        elevenlabs_voice_id: settings.elevenlabs_voice_id || 'pNInz6obpgDQGcFmaJgB',
       })
       .eq('id', true)
 
@@ -397,26 +419,63 @@ export default function Settings() {
 
             <div className="space-y-4 pt-1">
               {/* Opción A: Notas de voz */}
-              <div className="flex items-start justify-between gap-4 p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800">
-                <div className="flex items-start gap-3">
-                  <Mic className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-xs font-bold text-zinc-200">
-                      Responder con Nota de Voz cuando el cliente envíe audio
-                    </p>
-                    <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
-                      Si el cliente envía un audio de voz, el bot generará una respuesta de audio sintetizada automáticamente.
-                    </p>
+              <div className="p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800 space-y-3">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <Mic className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-xs font-bold text-zinc-200">
+                        Responder con Nota de Voz cuando el cliente envíe audio
+                      </p>
+                      <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
+                        Si el cliente envía un audio de voz, el bot generará una respuesta de audio sintetizada automáticamente con voz natural.
+                      </p>
+                    </div>
                   </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.voice_replies_enabled}
+                    onChange={(e) =>
+                      setSettings({ ...settings, voice_replies_enabled: e.target.checked })
+                    }
+                    className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 accent-emerald-500 cursor-pointer mt-1"
+                  />
                 </div>
-                <input
-                  type="checkbox"
-                  checked={settings.voice_replies_enabled}
-                  onChange={(e) =>
-                    setSettings({ ...settings, voice_replies_enabled: e.target.checked })
-                  }
-                  className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 accent-emerald-500 cursor-pointer mt-1"
-                />
+
+                {settings.voice_replies_enabled && (
+                  <div className="pt-3 border-t border-zinc-800/80 space-y-3">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-300">
+                      <Sparkles className="h-3.5 w-3.5 text-purple-400" />
+                      <span>Configuración de Voz (ElevenLabs)</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[10px] font-mono text-zinc-400 uppercase">ID de la Voz (Voice ID)</label>
+                        <input
+                          type="text"
+                          value={settings.elevenlabs_voice_id || ''}
+                          onChange={(e) => setSettings({ ...settings, elevenlabs_voice_id: e.target.value })}
+                          placeholder="pNInz6obpgDQGcFmaJgB (Adam)"
+                          className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 font-mono focus:border-purple-500 focus:outline-none"
+                        />
+                        <p className="text-[10px] text-zinc-500 mt-0.5">Puedes cambiar el código por cualquier voz en español de tu cuenta.</p>
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-mono text-zinc-400 uppercase">API Key de ElevenLabs</label>
+                        <input
+                          type="password"
+                          value={settings.elevenlabs_api_key || ''}
+                          onChange={(e) => setSettings({ ...settings, elevenlabs_api_key: e.target.value })}
+                          placeholder="sk_..."
+                          className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 font-mono focus:border-purple-500 focus:outline-none"
+                        />
+                        <p className="text-[10px] text-zinc-500 mt-0.5">10.000 caracteres gratis al mes (~150 pedidos). Si está vacío, usa voz estándar.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Opción B: Memoria y Lo mismo de siempre */}
@@ -579,15 +638,101 @@ export default function Settings() {
                 />
               </label>
             </div>
-
-            <button
-              type="submit"
-              className="rounded-xl bg-zinc-100 hover:bg-white text-zinc-900 px-5 py-2.5 font-bold text-xs transition flex items-center gap-1.5"
-            >
-              <Save className="h-3.5 w-3.5" />
-              <span>Guardar cambios</span>
-            </button>
           </section>
+
+          {/* 5. MÉTODOS DE PAGO Y BRE-B */}
+          <section className="rounded-2xl bg-zinc-900 p-5 md:p-6 border border-zinc-800 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-emerald-400 font-bold">
+                  Finanzas & Cobro Digital (0% Comisión)
+                </span>
+                <h2 className="text-base font-bold text-zinc-100 mt-0.5">Pagos con Bre-B / Transferencia</h2>
+              </div>
+              <Wallet className="h-5 w-5 text-emerald-400" />
+            </div>
+
+            <div className="space-y-4 pt-1">
+              <div className="flex items-start justify-between gap-4 p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800">
+                <div className="flex items-start gap-3">
+                  <Key className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-bold text-zinc-200">
+                      Habilitar opción de pago con Bre-B / Transferencia en el Bot
+                    </p>
+                    <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
+                      Permite que los clientes elijan pagar transfiriendo a tu Llave Bre-B, Nequi o Daviplata. El bot solicitará la captura del comprobante y lo validará automáticamente con IA anti-fraude.
+                    </p>
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={settings.bre_b_enabled}
+                  onChange={(e) =>
+                    setSettings({ ...settings, bre_b_enabled: e.target.checked })
+                  }
+                  className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 accent-emerald-500 cursor-pointer mt-1"
+                />
+              </div>
+
+              {settings.bre_b_enabled && (
+                <div className="p-4 rounded-xl bg-zinc-950/90 border border-zinc-800 space-y-3">
+                  <div className="flex items-center gap-1.5 text-xs text-amber-400 font-semibold">
+                    <ShieldCheck className="h-4 w-4" />
+                    <span>Datos bancarios protegidos (Solo administradores autorizados)</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <label className="block text-xs font-mono uppercase text-zinc-400">
+                      Llave Bre-B (Celular o Cédula)
+                      <input
+                        type="text"
+                        required={settings.bre_b_enabled}
+                        value={settings.bre_b_key || ''}
+                        onChange={(e) => setSettings({ ...settings, bre_b_key: e.target.value })}
+                        placeholder="300 123 4567"
+                        className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 font-mono focus:border-emerald-500 focus:outline-none"
+                      />
+                    </label>
+
+                    <label className="block text-xs font-mono uppercase text-zinc-400">
+                      Nombre del Titular
+                      <input
+                        type="text"
+                        required={settings.bre_b_enabled}
+                        value={settings.bre_b_holder_name || ''}
+                        onChange={(e) => setSettings({ ...settings, bre_b_holder_name: e.target.value })}
+                        placeholder="Monster Burger SAS"
+                        className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                      />
+                    </label>
+
+                    <label className="block text-xs font-mono uppercase text-zinc-400">
+                      Banco o Entidad
+                      <input
+                        type="text"
+                        value={settings.bre_b_bank_name || ''}
+                        onChange={(e) => setSettings({ ...settings, bre_b_bank_name: e.target.value })}
+                        placeholder="Nequi / Bancolombia"
+                        className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+                  <p className="text-[10px] text-zinc-500 font-mono">
+                    El cliente verá estos datos en Telegram/WhatsApp para transferir y deberá enviar la captura del comprobante para confirmación automática.
+                  </p>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <button
+            type="submit"
+            className="rounded-xl bg-zinc-100 hover:bg-white text-zinc-900 px-5 py-2.5 font-bold text-xs transition flex items-center gap-1.5"
+          >
+            <Save className="h-3.5 w-3.5" />
+            <span>Guardar cambios</span>
+          </button>
         </form>
       )}
     </div>

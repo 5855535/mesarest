@@ -193,3 +193,76 @@ export async function extractAudioWithGemini(
     return { extraction: null, metrics: baseMetrics }
   }
 }
+
+export interface ReceiptExtraction {
+  amount: number
+  reference: string
+  bank: string
+  date?: string
+  isValidReceipt: boolean
+}
+
+const RECEIPT_SYSTEM_PROMPT = `Eres un auditor experto en validación y lectura de comprobantes bancarios y transferencias en Colombia (Nequi, Daviplata, Bancolombia, Bre-B, Llaves, etc.).
+Tu tarea es analizar la imagen del comprobante y extraer con máxima precisión:
+1. amount: Valor numérico total transferido (ej: "$35.000" -> 35000). Si no se lee claramente pon 0.
+2. reference: Número de comprobante, referencia, MUP o número de aprobación (ej: "M1234567"). Si no se lee pon "".
+3. bank: Entidad de origen o destino (ej: "Nequi", "Bancolombia", "Daviplata", "Bre-B").
+4. date: Fecha u hora visible.
+5. isValidReceipt: boolean. true si la imagen muestra una transferencia o pago exitoso real. false si es un error, fallo, o imagen no relacionada.
+
+Responde ÚNICAMENTE un objeto JSON válido con esta estructura:
+{
+  "amount": 35000,
+  "reference": "M1234567",
+  "bank": "Nequi",
+  "date": "09/11/2026",
+  "isValidReceipt": true
+}`
+
+export async function validateReceiptWithGemini(
+  imageBase64: string,
+  mimeType: string = 'image/jpeg',
+): Promise<ReceiptExtraction | null> {
+  if (!GEMINI_API_KEY) return null
+
+  try {
+    const res = await fetch(GEMINI_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: `${RECEIPT_SYSTEM_PROMPT}\n\nAnaliza la imagen de este comprobante y extrae los datos:` },
+              {
+                inlineData: {
+                  mimeType,
+                  data: imageBase64,
+                },
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: 'application/json',
+        },
+      }),
+    })
+
+    if (!res.ok) {
+      console.error('[GEMINI_RECEIPT_ERROR]:', await res.text())
+      return null
+    }
+
+    const data = await res.json()
+    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text
+    if (!raw) return null
+
+    return JSON.parse(raw) as ReceiptExtraction
+  } catch (err) {
+    console.error('[GEMINI_RECEIPT_EXCEPTION]:', err)
+    return null
+  }
+}

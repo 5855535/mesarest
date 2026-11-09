@@ -5,8 +5,14 @@ import {
   type CatalogProduct,
   type ParsedOrder,
 } from './orderParser.ts'
-import { extractAudioWithGemini, extractWithGemini, type GeminiExtraction } from './gemini.ts'
+import {
+  extractAudioWithGemini,
+  extractWithGemini,
+  validateReceiptWithGemini,
+  type GeminiExtraction,
+} from './gemini.ts'
 import { transcribeWithGroq } from './stt.ts'
+import { generateElevenLabsSpeech, sendTelegramVoice } from './tts.ts'
 
 const BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') ?? ''
 const WEBHOOK_SECRET = Deno.env.get('TELEGRAM_WEBHOOK_SECRET') ?? ''
@@ -248,7 +254,7 @@ Deno.serve(async (req) => {
   // Cargar configuración de negocio
   const { data: settings } = await supabase
     .from('business_settings')
-    .select('name, delivery_fee, voice_replies_enabled, memory_reorder_enabled, menu_images, menu_image_url')
+    .select('name, delivery_fee, voice_replies_enabled, memory_reorder_enabled, menu_images, menu_image_url, bre_b_enabled, bre_b_key, bre_b_holder_name, bre_b_bank_name, elevenlabs_api_key, elevenlabs_voice_id')
     .single()
 
   const voiceRepliesEnabled = settings?.voice_replies_enabled ?? true
@@ -273,6 +279,44 @@ Deno.serve(async (req) => {
         chat_id: chatId,
         message_id: cb.message.message_id,
         text: '❌ Pedido cancelado.',
+      })
+      return new Response('OK')
+    }
+
+    if (data === 'pay:bre_b') {
+      const { data: session } = await supabase
+        .from('telegram_sessions')
+        .select('*')
+        .eq('chat_id', chatId)
+        .single()
+
+      if (!session || !session.draft_order) {
+        await tg('sendMessage', { chat_id: chatId, text: 'Tu sesión expiró. Escribe o envía tu pedido nuevamente.' })
+        return new Response('OK')
+      }
+
+      await supabase.from('telegram_sessions').update({
+        step: 'awaiting_payment_receipt',
+        updated_at: new Date().toISOString(),
+      }).eq('chat_id', chatId)
+
+      const draft = session.draft_order
+      const fee = draft.deliveryType === 'domicilio' ? Number(settings?.delivery_fee || 0) : 0
+      const totalPagar = Number(draft.subtotal || 0) + fee
+
+      const breBText = `📱 *PAGO CON BRE-B / TRANSFERENCIA*\n\nPor favor realiza la transferencia por el valor exacto de tu pedido:\n\n💰 *Total a transferir:* *${money(totalPagar)}*\n🔑 *Llave Bre-B:* \`${settings.bre_b_key || 'No configurada'}\`\n👤 *Titular:* *${settings.bre_b_holder_name || settings.name}*\n🏦 *Banco/Entidad:* *${settings.bre_b_bank_name || 'Bre-B / Nequi / Bancolombia'}*\n\n📸 *Envía una foto o captura del comprobante por aquí.*\nNuestro sistema validará el pago automáticamente con IA anti-fraude 🤖.`
+
+      await tg('editMessageText', {
+        chat_id: chatId,
+        message_id: cb.message.message_id,
+        text: breBText,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '💵 Cambiar a Efectivo al recibir', callback_data: 'confirm' }],
+            [{ text: '❌ Cancelar pedido', callback_data: 'cancel' }],
+          ],
+        },
       })
       return new Response('OK')
     }
@@ -704,7 +748,194 @@ Deno.serve(async (req) => {
       parse_mode: 'Markdown',
     })
 
-    await processParsedItems(chatId, customerName, username, isStaff, staff, aiResult, catalog, byId)
+    // Si las respuestas por voz están activadas, generar audio sintetizado con ElevenLabs (o fallback)
+    if (voiceRepliesEnabled && aiResult.items.length > 0) {
+      const itemsList = aiResult.items.map((i) => `${i.quantity} ${i.product_name}`).join(', ')
+      const speechText = `Entendido tu pedido de ${itemsList}. Por favor confirma los detalles para prepararlo.`
+      generateElevenLabsSpeech(
+        speechText,
+        settings?.elevenlabs_api_key,
+        settings?.elevenlabs_voice_id,
+      )
+        .then(async (speech) => {
+          if (speech) {
+            await sendTelegramVoice(BOT_TOKEN, chatId, speech)
+          }
+        })
+        .catch((err) => console.error('[VOICE_REPLY_ERROR]:', err))
+    }
+
+    await processParsedItems(chatId, customerName, username, isStaff, staff, aiResult, catalog, byId, settings)
+    return new Response('OK')
+  }
+
+  // ========================================================
+  // CASO D: FOTO (Comprobante de Pago Bre-B)
+  // ========================================================
+  if (msg.photo && msg.photo.length > 0) {
+    const { data: session } = await supabase
+      .from('telegram_sessions')
+      .select('*')
+      .eq('chat_id', chatId)
+      .maybeSingle()
+
+    if (!session || !session.draft_order || session.step !== 'awaiting_payment_receipt') {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: '📸 Recibí tu foto. Si deseas ordenar, envíanos tu pedido en texto o con una **nota de voz** 🎙. Toca /menu para consultar la carta.',
+      })
+      return new Response('OK')
+    }
+
+    await tg('sendChatAction', { chat_id: chatId, action: 'typing' })
+    const largestPhoto = msg.photo[msg.photo.length - 1]
+    const photoData = await downloadTelegramAudio(largestPhoto.file_id)
+
+    if (!photoData) {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: 'No pude descargar la imagen del comprobante. Por favor intenta enviarla de nuevo.',
+      })
+      return new Response('OK')
+    }
+
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text: '🔍 *Validando comprobante de transferencia con IA anti-fraude...*',
+      parse_mode: 'Markdown',
+    })
+
+    const receiptOcr = await validateReceiptWithGemini(photoData.base64, 'image/jpeg')
+    const draft = session.draft_order
+    const fee = draft.deliveryType === 'domicilio' ? Number(settings?.delivery_fee || 0) : 0
+    const totalEsperado = Number(draft.subtotal || 0) + fee
+
+    if (!receiptOcr || !receiptOcr.isValidReceipt || receiptOcr.amount <= 0 || !receiptOcr.reference) {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: `⚠️ *Comprobante no reconocido o ilegible*\n\nNo logramos verificar un comprobante de transferencia exitosa. Por favor asegúrate de enviar la captura clara donde se observe el valor transferido y el número de referencia/comprobante.\n\nO si prefieres, toca el botón para pagar en efectivo al recibir:`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '💵 Cambiar a Efectivo al recibir', callback_data: 'confirm' }],
+            [{ text: '❌ Cancelar', callback_data: 'cancel' }],
+          ],
+        },
+      })
+      return new Response('OK')
+    }
+
+    // 1. Verificación de monto
+    if (receiptOcr.amount < totalEsperado) {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: `⚠️ *Valor insuficiente en comprobante*\n\nEl comprobante indica una transferencia de *${money(receiptOcr.amount)}*, pero el total del pedido es de *${money(totalEsperado)}*.\n\nPor favor transfiere el valor completo o comunícate con nosotros.`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '💵 Cambiar a Efectivo al recibir', callback_data: 'confirm' }],
+            [{ text: '❌ Cancelar', callback_data: 'cancel' }],
+          ],
+        },
+      })
+      return new Response('OK')
+    }
+
+    // 2. Verificación Anti-Fraude de Referencia Duplicada
+    const cleanRef = receiptOcr.reference.trim().toUpperCase()
+    const { data: duplicate } = await supabase
+      .from('payment_receipts')
+      .select('id, reference_number, created_at')
+      .eq('reference_number', cleanRef)
+      .maybeSingle()
+
+    if (duplicate) {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: `🚫 *ALERTA DE SEGURIDAD*\n\nEste comprobante bancario (*Ref: ${cleanRef}*) ya fue registrado en nuestro sistema en una transacción previa.\n\nPor políticas de seguridad anti-fraude no se aceptan comprobantes reutilizados. Si crees que es un error, por favor comunícate con el restaurante.`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '💵 Pagar en Efectivo al recibir', callback_data: 'confirm' }],
+            [{ text: '❌ Cancelar pedido', callback_data: 'cancel' }],
+          ],
+        },
+      })
+      return new Response('OK')
+    }
+
+    // 3. Crear pedido con método 'transferencia'
+    const idempotencyKey = `tg-bre-b-${largestPhoto.file_id}`
+    let customerId: string | null = null
+
+    const { data: cust } = await supabase
+      .from('customers')
+      .select('id')
+      .eq('telegram_chat_id', chatId)
+      .maybeSingle()
+
+    if (cust) {
+      customerId = cust.id
+      if (draft.address) {
+        await supabase.from('customers').update({ address: draft.address }).eq('id', cust.id)
+      }
+    } else {
+      const { data: newCust } = await supabase
+        .from('customers')
+        .insert({
+          full_name: session.customer_name || 'Cliente Telegram',
+          telegram_chat_id: chatId,
+          telegram_username: session.username,
+          address: draft.address || null,
+        })
+        .select('id')
+        .single()
+      if (newCust) customerId = newCust.id
+    }
+
+    const { data: orderId, error: orderErr } = await supabase.rpc('create_order', {
+      p_channel: 'telegram',
+      p_delivery_type: draft.deliveryType || 'recogida',
+      p_payment_method: 'transferencia',
+      p_customer_id: customerId,
+      p_delivery_address: draft.address || null,
+      p_notes: `Pagado Bre-B (Ref: ${cleanRef} - ${receiptOcr.bank || 'Transferencia'})`,
+      p_items: draft.items,
+      p_idempotency_key: idempotencyKey,
+      p_table_label: draft.table || null,
+    })
+
+    if (orderErr) {
+      await tg('sendMessage', { chat_id: chatId, text: `⚠️ Error al crear pedido: ${orderErr.message}` })
+      return new Response('OK')
+    }
+
+    // 4. Registrar comprobante en tabla payment_receipts para blindar contra reúsos
+    await supabase.from('payment_receipts').insert({
+      order_id: orderId,
+      reference_number: cleanRef,
+      amount: receiptOcr.amount,
+      bank: receiptOcr.bank,
+      payer_name: session.customer_name,
+      receipt_date: receiptOcr.date || null,
+      raw_ocr: receiptOcr,
+    })
+
+    const { data: ord } = await supabase
+      .from('orders')
+      .select('order_number, total')
+      .eq('id', orderId)
+      .single()
+
+    await supabase.from('telegram_sessions').delete().eq('chat_id', chatId)
+
+    const num = ord?.order_number ? `#${ord.order_number}` : ''
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text: `🎉 *¡PAGO VERIFICADO CON ÉXITO!*\n\n✅ Comprobante validado: *Ref: ${cleanRef}*\n🏦 Entidad: *${receiptOcr.bank || 'Bre-B'}*\n💰 Monto: *${money(receiptOcr.amount)}*\n\n*¡Tu pedido ${num} ya está en preparación en cocina!* 👨‍🍳\n¡Muchas gracias por tu compra!`,
+      parse_mode: 'Markdown',
+    })
+
     return new Response('OK')
   }
 
@@ -1314,7 +1545,14 @@ async function showFinalSummary(
   editMessageId: number | null,
   draft: any,
   isStaff: boolean,
+  settings?: any,
 ) {
+  let currentSettings = settings
+  if (!currentSettings) {
+    const { data: s } = await supabase.from('business_settings').select('*').single()
+    currentSettings = s
+  }
+
   const tipoTxt = isStaff && draft.table
     ? `🍽 *Mesa:* ${draft.table}`
     : draft.deliveryType === 'domicilio'
@@ -1324,19 +1562,39 @@ async function showFinalSummary(
   const cabecera = isStaff ? '👨‍🍳 *PEDIDO DE PERSONAL (MESERO)*' : '📝 *CONFIRMACIÓN DE PEDIDO*'
   const botonConfirmar = isStaff ? '✅ Enviar a Cocina' : '✅ Confirmar pedido'
 
-  const texto = `${cabecera}\n\n${tipoTxt}\n\n${draft.detalleTxt}\n💰 *TOTAL:* *${money(draft.subtotal)}*\n_Pago en efectivo al recibir_\n\n¿Confirmar para enviar a preparación?`
+  const canBreB = !isStaff && currentSettings?.bre_b_enabled && currentSettings?.bre_b_key
+  const fee = draft.deliveryType === 'domicilio' ? Number(currentSettings?.delivery_fee || 0) : 0
+  const total = Number(draft.subtotal || 0) + fee
+  const feeTxt = fee > 0 ? ` (+ Domicilio: ${money(fee)})` : ''
+
+  const pagoTexto = canBreB
+    ? '¿Cómo deseas pagar tu pedido?'
+    : '_Pago en efectivo al recibir_\n\n¿Confirmar para enviar a preparación?'
+
+  const texto = `${cabecera}\n\n${tipoTxt}\n\n${draft.detalleTxt}\n💰 *TOTAL:* *${money(total)}*${feeTxt}\n\n${pagoTexto}`
+
+  const botones = isStaff
+    ? [
+        [{ text: botonConfirmar, callback_data: 'confirm' }],
+        [{ text: '❌ Cancelar', callback_data: 'cancel' }],
+      ]
+    : canBreB
+      ? [
+          [{ text: '💵 Confirmar con Efectivo', callback_data: 'confirm' }],
+          [{ text: '📱 Pagar con Bre-B / Transferencia', callback_data: 'pay:bre_b' }],
+          [{ text: '❌ Cancelar', callback_data: 'cancel' }],
+        ]
+      : [
+          [{ text: botonConfirmar, callback_data: 'confirm' }],
+          [{ text: '❌ Cancelar', callback_data: 'cancel' }],
+        ]
 
   const payload: any = {
     chat_id: chatId,
     text: texto,
     parse_mode: 'Markdown',
     reply_markup: {
-      inline_keyboard: [
-        [
-          { text: botonConfirmar, callback_data: 'confirm' },
-          { text: '❌ Cancelar', callback_data: 'cancel' },
-        ],
-      ],
+      inline_keyboard: botones,
     },
   }
 
