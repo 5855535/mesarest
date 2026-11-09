@@ -59,10 +59,10 @@ Deno.serve(async (req) => {
     })
   }
 
-  // Prevención de duplicados: Si ya se notificó en los últimos 20 segundos, omitir
+  // Prevención de duplicados: Si ya se notificó en los últimos 30 segundos, omitir
   if ((ord as any).customer_notified_at) {
-    const elapsed = Date.now() - new Date((ord as any).customer_notified_at).getTime()
-    if (elapsed < 20_000) {
+    const elapsed = Math.abs(Date.now() - new Date((ord as any).customer_notified_at).getTime())
+    if (elapsed < 30_000) {
       return new Response(JSON.stringify({ ok: true, notified: false, reason: 'Already notified recently' }), {
         headers: { 'Content-Type': 'application/json' },
       })
