@@ -12,6 +12,10 @@ alter table public.business_settings
   add column if not exists notify_function_url text,
   add column if not exists notify_function_key text;
 
+-- Columna para prevenir notificaciones duplicadas en pedidos
+alter table public.orders
+  add column if not exists customer_notified_at timestamptz;
+
 create or replace function public.trg_notify_order_status()
 returns trigger
 language plpgsql
@@ -24,11 +28,11 @@ declare
   v_should_notify boolean := false;
 begin
   -- Reglas de disparo:
-  -- 1. Domicilio: se notifica cuando pasa a 'recogido' (el repartidor sale con el pedido en camino)
-  -- 2. Recogida o Mesa: se notifica cuando pasa a 'listo' (el pedido ya esta preparado)
-  if new.delivery_type = 'domicilio' and new.status = 'recogido' and (old.status is distinct from 'recogido') then
+  -- 1. Domicilio: se notifica cuando pasa a 'recogido' o 'entregado' (salida en camino)
+  -- 2. Recogida o Mesa: se notifica cuando pasa a 'listo' o 'entregado' (preparado)
+  if new.delivery_type = 'domicilio' and new.status in ('recogido', 'entregado') and (old.status not in ('recogido', 'entregado')) then
     v_should_notify := true;
-  elsif new.delivery_type in ('recogida', 'mesa') and new.status = 'listo' and (old.status is distinct from 'listo') then
+  elsif new.delivery_type in ('recogida', 'mesa') and new.status in ('listo', 'entregado') and (old.status not in ('listo', 'entregado')) then
     v_should_notify := true;
   end if;
 

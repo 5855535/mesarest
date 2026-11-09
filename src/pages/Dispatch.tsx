@@ -95,6 +95,17 @@ export default function Dispatch() {
       ...prev,
     ])
 
+    // Disparar notificación directa e INMEDIATA (sin depender exclusivamente de la cola de pg_net)
+    supabase.functions
+      .invoke('notify-order-status', {
+        body: {
+          order_id: o.id,
+          new_status: 'entregado',
+          delivery_type: o.delivery_type,
+        },
+      })
+      .catch((err) => console.error('[NOTIFY_DISPATCH_DIRECT_ERROR]:', err))
+
     const { error: err } = await supabase.rpc('set_order_status', {
       p_order_id: o.id,
       p_new_status: 'entregado',

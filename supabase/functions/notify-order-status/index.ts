@@ -44,7 +44,7 @@ Deno.serve(async (req) => {
   // Consultar pedido y cliente asociado
   const { data: ord, error } = await supabase
     .from('orders')
-    .select('order_number, status, delivery_type, delivery_address, total, table_label, customer:customers(telegram_chat_id, full_name)')
+    .select('order_number, status, delivery_type, delivery_address, total, table_label, customer_notified_at, customer:customers(telegram_chat_id, full_name)')
     .eq('id', order_id)
     .single()
 
@@ -59,20 +59,30 @@ Deno.serve(async (req) => {
     })
   }
 
+  // Prevención de duplicados: Si ya se notificó en los últimos 20 segundos, omitir
+  if ((ord as any).customer_notified_at) {
+    const elapsed = Date.now() - new Date((ord as any).customer_notified_at).getTime()
+    if (elapsed < 20_000) {
+      return new Response(JSON.stringify({ ok: true, notified: false, reason: 'Already notified recently' }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+  }
+
   const num = `#${ord.order_number}`
   const effectiveStatus = new_status || ord.status
   const effectiveType = delivery_type || ord.delivery_type
 
-  // Mensaje detallado según el tipo de entrega y el estado exacto
+  // Mensaje detallado según el tipo de entrega y el estado
   let mensaje = ''
-  if (effectiveType === 'domicilio' && effectiveStatus === 'recogido') {
+  if (effectiveType === 'domicilio' && (effectiveStatus === 'recogido' || effectiveStatus === 'entregado')) {
     const dirTxt = ord.delivery_address
       ? `\n📍 *A esta dirección se llevará tu pedido:*\n_${ord.delivery_address}_\n`
       : ''
     mensaje = `🛵 *¡Tu pedido ${num} ya salió del restaurante y va en camino!*${dirTxt}\nEl domiciliario se dirige hacia allá. Por favor ten listo el pago en efectivo.\n\n¡Muchas gracias por tu compra!`
-  } else if (effectiveType === 'recogida' && effectiveStatus === 'listo') {
+  } else if (effectiveType === 'recogida' && (effectiveStatus === 'listo' || effectiveStatus === 'entregado')) {
     mensaje = `🛍 *¡Tu pedido ${num} ya está listo en el local para que pases a recogerlo!*\n\n¡Te esperamos en el mostrador!`
-  } else if (effectiveType === 'mesa' && effectiveStatus === 'listo') {
+  } else if (effectiveType === 'mesa' && (effectiveStatus === 'listo' || effectiveStatus === 'entregado')) {
     const mesaTxt = ord.table_label ? ` a la Mesa ${ord.table_label}` : ''
     mensaje = `🍽 *¡Tu pedido ${num} ya está listo y va hacia tu mesa${mesaTxt}!*\n\n¡Buen provecho!`
   } else {
@@ -83,6 +93,12 @@ Deno.serve(async (req) => {
   }
 
   await sendTelegram(chat, mensaje)
+
+  // Registrar fecha de notificación
+  await supabase
+    .from('orders')
+    .update({ customer_notified_at: new Date().toISOString() })
+    .eq('id', order_id)
 
   return new Response(JSON.stringify({ ok: true, notified: true }), {
     headers: { 'Content-Type': 'application/json' },
